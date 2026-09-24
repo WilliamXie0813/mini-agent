@@ -1,5 +1,5 @@
 import { Button, ConfigProvider, notification } from "antd";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ChatPanel } from "./components/ChatPanel";
 import { Composer } from "./components/Composer";
 import { InspectorPanel } from "./components/InspectorPanel";
@@ -15,6 +15,22 @@ export default function App() {
       notification.error({ message: "服务端错误", description: lastError });
     }
   }, [lastError]);
+
+  // 只在"曾经连上过然后断开"时提醒，避免首屏未连接就误报
+  const wasConnected = useRef(false);
+
+  useEffect(() => {
+    if (connected) {
+      wasConnected.current = true;
+      return;
+    }
+    if (wasConnected.current) {
+      notification.warning({
+        message: "连接已断开",
+        description: "正在尝试自动重连…",
+      });
+    }
+  }, [connected]);
 
   const turnCount = events.filter(
     (stored) => stored.event.type === "turn_start",
