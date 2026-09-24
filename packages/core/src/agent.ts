@@ -39,6 +39,10 @@ class MessageQueue {
   clear(): void {
     this.messages = [];
   }
+
+  snapshot(): AgentMessage[] {
+    return this.messages.slice();
+  }
 }
 
 interface ActiveRun {
@@ -86,6 +90,16 @@ export class Agent {
 
   get state(): AgentState {
     return this.mutableState;
+  }
+
+  get queuedMessages(): {
+    steering: AgentMessage[];
+    followUp: AgentMessage[];
+  } {
+    return {
+      steering: this.steeringQueue.snapshot(),
+      followUp: this.followUpQueue.snapshot(),
+    };
   }
 
   subscribe(listener: Listener): () => void {
