@@ -61,6 +61,23 @@ const wss = new WebSocketServer({ server, path: "/ws" });
 const session = new AgentSession(createAgent());
 session.attach(wss);
 
+function shutdown(): void {
+  console.log("Shutting down…");
+  session.dispose();
+  for (const client of wss.clients) {
+    client.terminate();
+  }
+  wss.close();
+  server.close(() => {
+    process.exit(0);
+  });
+  // 兜底：连接迟迟不结束时强退
+  setTimeout(() => process.exit(0), 2000).unref();
+}
+
+process.on("SIGINT", shutdown);
+process.on("SIGTERM", shutdown);
+
 server.listen(PORT, HOST, () => {
   console.log(`mini-agent server listening on http://${HOST}:${PORT}`);
 });
