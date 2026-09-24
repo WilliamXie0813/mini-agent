@@ -31,3 +31,4 @@ Thumbs.db
 # Cache
 .cache/
 .eslintcache
+.superpowers/
