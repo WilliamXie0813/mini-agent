@@ -6,6 +6,7 @@
     "lib": ["ES2022", "DOM", "DOM.Iterable"],
     "jsx": "react-jsx",
     "types": ["vite/client", "vitest/globals", "@testing-library/jest-dom"],
+    // paths 仅供 type-only 引用；不要对 @mini-agent/server 做运行时 value import
     "paths": {
       "@mini-agent/core": ["../core/src/index.ts"],
       "@mini-agent/server": ["../server/src/protocol.ts"]
