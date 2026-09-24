@@ -32,3 +32,6 @@ Thumbs.db
 .cache/
 .eslintcache
 .superpowers/
+
+# Worktrees
+.worktrees/
