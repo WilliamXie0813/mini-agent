@@ -18,7 +18,7 @@ export function MessageItem({
     case "user":
       return (
         <div className="my-2 flex justify-end">
-          <div className="max-w-[70%] rounded-lg bg-blue-500 px-3 py-2 text-sm text-white">
+          <div className="max-w-[70%] rounded-lg bg-brand-700 px-3 py-2 text-sm text-white">
             {message.content}
           </div>
         </div>
@@ -26,7 +26,7 @@ export function MessageItem({
     case "assistant":
       return (
         <div className="my-2 flex justify-start">
-          <div className="max-w-[70%] rounded-lg bg-gray-100 px-3 py-2 text-sm">
+          <div className="max-w-[70%] rounded-lg bg-stone-100 px-3 py-2 text-sm">
             {message.content.map((part, index) =>
               part.type === "text" ? (
                 <p key={index} className="whitespace-pre-wrap">
@@ -40,7 +40,11 @@ export function MessageItem({
                 />
               ),
             )}
-            {streaming ? <span aria-hidden="true">▍</span> : null}
+            {streaming ? (
+              <span aria-hidden="true" className="streaming-cursor">
+                ▍
+              </span>
+            ) : null}
             {message.errorMessage ? (
               <p className="mt-1 text-xs text-red-500">
                 {message.stopReason}: {message.errorMessage}
@@ -56,7 +60,7 @@ export function MessageItem({
             className={`max-w-[70%] rounded border px-3 py-1 text-xs ${
               message.isError
                 ? "border-red-300 bg-red-50"
-                : "border-gray-200 bg-gray-50"
+                : "border-teal-200 bg-teal-50"
             }`}
           >
             <summary className="cursor-pointer">

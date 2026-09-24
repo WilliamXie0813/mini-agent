@@ -29,6 +29,8 @@ export type ClientCommand =
 export type ServerMessage =
   | { type: "state"; state: SerializableAgentState }
   | { type: "event"; event: AgentEvent }
+  /** Broadcast after a session reset so every client can clear local logs. */
+  | { type: "reset" }
   | { type: "error"; message: string };
 
 export function serializeState(

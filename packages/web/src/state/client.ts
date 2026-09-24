@@ -17,6 +17,8 @@ export interface ClientSnapshot {
   state: SerializableAgentState;
   events: StoredEvent[];
   connected: boolean;
+  /** Bumped each time the server confirms a session reset. */
+  resetCount: number;
   lastError?: string;
 }
 
@@ -38,6 +40,7 @@ export class AgentClient {
     state: emptyState(),
     events: [],
     connected: false,
+    resetCount: 0,
   };
   private readonly listeners = new Set<() => void>();
   private readonly createSocket: WebSocketFactory;
@@ -145,6 +148,15 @@ export class AgentClient {
         });
         return;
       }
+      case "reset":
+        // The server confirmed a session reset. Drop the local event log so
+        // the timeline and derived counters (e.g. turn count) match the
+        // cleared transcript, and bump resetCount so the UI can confirm.
+        this.update({
+          events: [],
+          resetCount: this.snapshot.resetCount + 1,
+        });
+        return;
       case "error":
         this.update({ lastError: message.message });
         return;

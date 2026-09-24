@@ -7,7 +7,7 @@ describe("InspectorPanel", () => {
   it("renders the three tabs", () => {
     render(<InspectorPanel state={emptyState()} events={[]} />);
     expect(screen.getByText(/事件流/)).toBeInTheDocument();
-    expect(screen.getByText("消息历史")).toBeInTheDocument();
+    expect(screen.getByText(/消息历史/)).toBeInTheDocument();
     expect(screen.getByText("队列与状态")).toBeInTheDocument();
   });
 

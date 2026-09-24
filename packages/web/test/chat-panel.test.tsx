@@ -1,13 +1,27 @@
-import { render, screen } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { fireEvent, render, screen } from "@testing-library/react";
+import { describe, expect, it, vi } from "vitest";
 import type { AssistantMessage } from "@mini-agent/core";
 import { ChatPanel } from "../src/components/ChatPanel";
 import { emptyState } from "../src/state/reducer";
 
 describe("ChatPanel", () => {
-  it("shows an empty hint when there are no messages", () => {
+  it("shows a welcome panel with example prompts when there are no messages", () => {
     render(<ChatPanel state={emptyState()} />);
-    expect(screen.getByText("发送消息开始对话")).toBeInTheDocument();
+    expect(
+      screen.getByText("一个会调用工具的教学 Agent"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "读取 package.json，告诉我项目名称" }),
+    ).toBeInTheDocument();
+  });
+
+  it("emits onExample when an example prompt chip is clicked", () => {
+    const onExample = vi.fn();
+    render(<ChatPanel state={emptyState()} onExample={onExample} />);
+    fireEvent.click(
+      screen.getByRole("button", { name: "你好，介绍一下你自己" }),
+    );
+    expect(onExample).toHaveBeenCalledWith("你好，介绍一下你自己");
   });
 
   it("renders user and assistant messages plus tool call cards", () => {

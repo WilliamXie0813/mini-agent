@@ -15,7 +15,7 @@ export function InspectorPanel({
   defaultActiveKey = "events",
 }: InspectorPanelProps) {
   return (
-    <div className="flex w-96 shrink-0 flex-col border-l border-gray-200">
+    <div className="flex w-96 shrink-0 flex-col border-l border-stone-200">
       <Tabs
         className="inspector-tabs flex-1 min-h-0 px-3"
         defaultActiveKey={defaultActiveKey}
@@ -27,9 +27,9 @@ export function InspectorPanel({
           },
           {
             key: "messages",
-            label: "消息历史",
+            label: `消息历史 (${state.messages.length})`,
             children: (
-              <pre className="h-full overflow-auto text-xs">
+              <pre className="h-full overflow-auto whitespace-pre-wrap break-all text-xs">
                 {JSON.stringify(state.messages, null, 2)}
               </pre>
             ),
@@ -45,7 +45,7 @@ export function InspectorPanel({
                 <pre>{JSON.stringify(state.queues.followUp, null, 2)}</pre>
                 <h4 className="mt-2 font-medium">pendingToolCalls</h4>
                 {state.pendingToolCalls.length === 0 ? (
-                  <p className="text-gray-400">无</p>
+                  <p className="text-stone-400">无</p>
                 ) : (
                   state.pendingToolCalls.map((id) => <Tag key={id}>{id}</Tag>)
                 )}

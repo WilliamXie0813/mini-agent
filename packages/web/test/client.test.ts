@@ -99,6 +99,19 @@ describe("AgentClient", () => {
     client.dispose();
   });
 
+  it("clears the event log and bumps resetCount when the server confirms a reset", () => {
+    const { client, socket } = createClient();
+    client.connect();
+    socket.emit("open", {});
+    socket.receive({ type: "event", event: { type: "agent_start" } });
+    expect(client.getSnapshot().events).toHaveLength(1);
+
+    socket.receive({ type: "reset" });
+    expect(client.getSnapshot().events).toHaveLength(0);
+    expect(client.getSnapshot().resetCount).toBe(1);
+    client.dispose();
+  });
+
   it("stores server error messages as lastError", () => {
     const { client, socket } = createClient();
     client.connect();

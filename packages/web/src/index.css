@@ -17,3 +17,20 @@ details[open] > summary .disclosure-marker {
   display: inline-block;
   transform: rotate(90deg);
 }
+
+/* Blinking streaming cursor; static when the user prefers reduced motion. */
+.streaming-cursor {
+  animation: cursor-blink 1s step-end infinite;
+}
+
+@keyframes cursor-blink {
+  50% {
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .streaming-cursor {
+    animation: none;
+  }
+}

@@ -86,6 +86,7 @@ export class AgentSession {
         return;
       case "reset":
         this.agent.reset();
+        this.broadcast({ type: "reset" });
         return;
     }
   }

@@ -44,7 +44,7 @@ describe("Composer", () => {
   it("emits onFollowUp while streaming", () => {
     const props = renderComposer(true);
     fireEvent.change(
-      screen.getByPlaceholderText("Agent 运行中：可以 steer 或 followUp…"),
+      screen.getByPlaceholderText("Agent 运行中：可以 Steer 或 FollowUp…"),
       { target: { value: "稍后继续" } },
     );
     fireEvent.click(screen.getByRole("button", { name: "FollowUp" }));
@@ -88,7 +88,7 @@ describe("Composer", () => {
   it("routes Enter to onSteer while streaming", () => {
     const props = renderComposer(true);
     const textarea = screen.getByPlaceholderText(
-      "Agent 运行中：可以 steer 或 followUp…",
+      "Agent 运行中：可以 Steer 或 FollowUp…",
     );
     fireEvent.change(textarea, { target: { value: "纠正一下" } });
     fireEvent.keyDown(textarea, { key: "Enter", shiftKey: false });

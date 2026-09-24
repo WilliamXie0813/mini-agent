@@ -185,6 +185,7 @@ test("reset command clears the transcript back to the system message", async () 
       (m) => m.type === "event" && m.event.type === "agent_end",
     );
     context.socket.send(JSON.stringify({ type: "reset" }));
+    await waitFor(context.received, (m) => m.type === "reset");
     const state = await waitFor(
       context.received,
       (m) => m.type === "state" && m.state.messages.length === 1,
