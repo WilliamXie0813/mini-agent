@@ -55,5 +55,25 @@ describe("ChatPanel", () => {
     };
     render(<ChatPanel state={{ ...emptyState(), streamingMessage: streaming }} />);
     expect(screen.getByText(/正在回答/)).toBeInTheDocument();
+    expect(screen.getByText("▍")).toBeInTheDocument();
+  });
+
+  it("keeps the cursor when the last streaming part is a toolCall", () => {
+    const streaming: AssistantMessage = {
+      role: "assistant",
+      content: [
+        { type: "text", text: "好" },
+        { type: "toolCall", id: "c1", name: "read", arguments: {} },
+      ],
+      stopReason: "toolUse",
+      timestamp: 1,
+    };
+    render(
+      <ChatPanel
+        state={{ ...emptyState(), streamingMessage: streaming, pendingToolCalls: ["c1"] }}
+      />,
+    );
+    expect(screen.getByText("▍")).toBeInTheDocument();
+    expect(screen.getByText("执行中")).toBeInTheDocument();
   });
 });

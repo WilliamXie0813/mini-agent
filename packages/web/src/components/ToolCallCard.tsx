@@ -11,7 +11,7 @@ export function ToolCallCard({
   return (
     <div className="my-1 rounded border border-purple-200 bg-purple-50 px-3 py-2 text-sm">
       <div className="flex items-center gap-2">
-        <span>🔧</span>
+        <span aria-hidden="true">🔧</span>
         <span className="font-mono">{toolCall.name}</span>
         {pending ? (
           <Tag color="processing">执行中</Tag>

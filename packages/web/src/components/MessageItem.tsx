@@ -31,9 +31,6 @@ export function MessageItem({
               part.type === "text" ? (
                 <p key={index} className="whitespace-pre-wrap">
                   {part.text}
-                  {streaming && index === message.content.length - 1
-                    ? "▍"
-                    : ""}
                 </p>
               ) : (
                 <ToolCallCard
@@ -43,6 +40,7 @@ export function MessageItem({
                 />
               ),
             )}
+            {streaming ? <span aria-hidden="true">▍</span> : null}
             {message.errorMessage ? (
               <p className="mt-1 text-xs text-red-500">
                 {message.stopReason}: {message.errorMessage}

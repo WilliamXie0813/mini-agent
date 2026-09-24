@@ -8,7 +8,12 @@ export function ChatPanel({ state }: { state: SerializableAgentState }) {
   );
 
   return (
-    <div className="flex-1 overflow-y-auto px-4 py-3">
+    <div
+      role="log"
+      aria-live="polite"
+      aria-label="对话消息"
+      className="flex-1 overflow-y-auto px-4 py-3"
+    >
       {visible.length === 0 && !state.streamingMessage ? (
         <Empty description="发送消息开始对话" />
       ) : (
