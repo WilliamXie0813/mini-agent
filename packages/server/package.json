@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "node --experimental-strip-types --watch src/index.ts",
+    "dev": "node --experimental-strip-types --watch src/server.ts",
     "test": "node --experimental-strip-types --test test/*.test.ts",
     "check": "tsc --noEmit"
   },
