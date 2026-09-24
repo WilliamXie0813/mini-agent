@@ -36,7 +36,10 @@ export function Composer({
             : "输入消息…"
         }
         autoSize={{ minRows: 2, maxRows: 6 }}
+        aria-label={isStreaming ? "steer 或 followUp 消息" : "输入消息"}
         onPressEnter={(event) => {
+          const native = event.nativeEvent as KeyboardEvent;
+          if (native.isComposing || native.keyCode === 229) return;
           if (event.shiftKey || !ready) return;
           event.preventDefault();
           submit(isStreaming ? onSteer : onPrompt);

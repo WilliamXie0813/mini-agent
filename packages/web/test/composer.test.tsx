@@ -38,6 +38,7 @@ describe("Composer", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: /发\s*送/ }));
     expect(props.onPrompt).toHaveBeenCalledWith("你好");
+    expect(screen.getByPlaceholderText("输入消息…")).toHaveValue("");
   });
 
   it("emits onFollowUp while streaming", () => {
@@ -54,5 +55,44 @@ describe("Composer", () => {
     const props = renderComposer(true);
     fireEvent.click(screen.getByRole("button", { name: /中\s*止/ }));
     expect(props.onAbort).toHaveBeenCalled();
+  });
+
+  it("submits on Enter when idle", () => {
+    const props = renderComposer(false);
+    const textarea = screen.getByPlaceholderText("输入消息…");
+    fireEvent.change(textarea, { target: { value: "回车发送" } });
+    fireEvent.keyDown(textarea, { key: "Enter", shiftKey: false });
+    expect(props.onPrompt).toHaveBeenCalledWith("回车发送");
+  });
+
+  it("does not submit on Shift+Enter", () => {
+    const props = renderComposer(false);
+    const textarea = screen.getByPlaceholderText("输入消息…");
+    fireEvent.change(textarea, { target: { value: "换行" } });
+    fireEvent.keyDown(textarea, { key: "Enter", shiftKey: true });
+    expect(props.onPrompt).not.toHaveBeenCalled();
+  });
+
+  it("does not submit while IME composition is active", () => {
+    const props = renderComposer(false);
+    const textarea = screen.getByPlaceholderText("输入消息…");
+    fireEvent.change(textarea, { target: { value: "nihao" } });
+    fireEvent.keyDown(textarea, {
+      key: "Enter",
+      isComposing: true,
+      keyCode: 229,
+    });
+    expect(props.onPrompt).not.toHaveBeenCalled();
+  });
+
+  it("routes Enter to onSteer while streaming", () => {
+    const props = renderComposer(true);
+    const textarea = screen.getByPlaceholderText(
+      "Agent 运行中：可以 steer 或 followUp…",
+    );
+    fireEvent.change(textarea, { target: { value: "纠正一下" } });
+    fireEvent.keyDown(textarea, { key: "Enter", shiftKey: false });
+    expect(props.onSteer).toHaveBeenCalledWith("纠正一下");
+    expect(props.onPrompt).not.toHaveBeenCalled();
   });
 });
