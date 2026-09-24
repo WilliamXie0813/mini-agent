@@ -1,14 +1,11 @@
 {
-  "name": "minimal-mock-agent",
+  "name": "mini-agent-v2",
   "private": true,
   "type": "module",
   "scripts": {
-    "demo": "node --experimental-strip-types src/demo.ts",
-    "test": "node --experimental-strip-types --test test/*.test.ts",
-    "check": "tsc --noEmit"
-  },
-  "devDependencies": {
-    "@types/node": "22.19.19",
-    "typescript": "5.9.3"
+    "dev": "pnpm -r --parallel --if-present run dev",
+    "test": "pnpm -r run test",
+    "check": "pnpm -r run check",
+    "demo": "pnpm --filter @mini-agent/core run demo"
   }
 }
