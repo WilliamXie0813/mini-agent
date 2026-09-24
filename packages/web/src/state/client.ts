@@ -43,7 +43,6 @@ export class AgentClient {
   private socket?: WebSocketLike;
   private reconnectTimer?: ReturnType<typeof setTimeout>;
   private reconnectAttempts = 0;
-  private disposed = false;
 
   constructor(url: string, createSocket?: WebSocketFactory) {
     this.url = url;
@@ -52,30 +51,54 @@ export class AgentClient {
   }
 
   connect(): void {
-    if (this.disposed) return;
+    // Cancel a pending reconnect and drop the previous socket (if any)
+    // before opening a new one. Detaching this.socket first makes the old
+    // socket's close event hit the stale-socket guard below, so it cannot
+    // schedule a duplicate reconnect.
+    if (this.reconnectTimer !== undefined) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = undefined;
+    }
+    const previous = this.socket;
+    this.socket = undefined;
+    previous?.close();
+
     const socket = this.createSocket(this.url);
     this.socket = socket;
     socket.addEventListener("open", () => {
+      if (this.socket !== socket) return;
       this.reconnectAttempts = 0;
-      this.update({ connected: true });
+      this.update({ connected: true, lastError: undefined });
     });
     socket.addEventListener("message", (event) => {
+      if (this.socket !== socket) return;
       const data = (event as { data?: unknown }).data;
       if (typeof data === "string") this.handleMessage(data);
     });
     socket.addEventListener("close", () => {
+      if (this.socket !== socket) return;
       this.update({ connected: false });
       this.scheduleReconnect();
     });
     socket.addEventListener("error", () => {});
   }
 
+  /**
+   * Closes the socket and cancels any pending reconnect timer. The client
+   * is not permanently dead: connect() revives it. This matters for React
+   * 18 StrictMode, which runs effect cleanup then setup again with the
+   * same instance (dispose → connect must be a working restart sequence).
+   */
   dispose(): void {
-    this.disposed = true;
     if (this.reconnectTimer !== undefined) {
       clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = undefined;
     }
-    this.socket?.close();
+    // Detach before closing so the close event is ignored as stale and no
+    // reconnect is scheduled.
+    const socket = this.socket;
+    this.socket = undefined;
+    socket?.close();
   }
 
   send(command: ClientCommand): void {
@@ -122,7 +145,6 @@ export class AgentClient {
   }
 
   private scheduleReconnect(): void {
-    if (this.disposed) return;
     const delay = Math.min(1000 * 2 ** this.reconnectAttempts, 10_000);
     this.reconnectAttempts += 1;
     this.reconnectTimer = setTimeout(() => this.connect(), delay);

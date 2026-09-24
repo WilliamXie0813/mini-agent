@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ServerMessage } from "@mini-agent/server";
 import { AgentClient, type WebSocketLike } from "../src/state/client";
 
@@ -42,6 +42,21 @@ function createClient() {
   const client = new AgentClient("ws://test/ws", () => socket);
   return { client, socket };
 }
+
+function createTrackedClient() {
+  const sockets: FakeSocket[] = [];
+  const factory = vi.fn(() => {
+    const socket = new FakeSocket();
+    sockets.push(socket);
+    return socket;
+  });
+  const client = new AgentClient("ws://test/ws", factory);
+  return { client, sockets, factory };
+}
+
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 describe("AgentClient", () => {
   it("applies state messages and reports connected on open", () => {
@@ -103,6 +118,54 @@ describe("AgentClient", () => {
     client.connect();
     socket.emit("open", {});
     expect(listener).toHaveBeenCalled();
+    client.dispose();
+  });
+});
+
+describe("AgentClient reconnect lifecycle", () => {
+  it("reconnects once after close and ignores stale socket events", () => {
+    vi.useFakeTimers();
+    const { client, sockets, factory } = createTrackedClient();
+    client.connect();
+    const first = sockets[0]!;
+    first.emit("open", {});
+    first.emit("close", {});
+    expect(factory).toHaveBeenCalledTimes(1);
+
+    vi.advanceTimersByTime(1000);
+    expect(factory).toHaveBeenCalledTimes(2);
+    const second = sockets[1]!;
+    second.emit("open", {});
+    expect(client.getSnapshot().connected).toBe(true);
+
+    // Stale socket events must not touch state or schedule reconnects.
+    const snapshot = client.getSnapshot();
+    first.emit("close", {});
+    first.receive({ type: "event", event: { type: "agent_start" } });
+    expect(client.getSnapshot()).toBe(snapshot);
+    vi.advanceTimersByTime(10_000);
+    expect(factory).toHaveBeenCalledTimes(2);
+    client.dispose();
+  });
+
+  it("dispose cancels a pending reconnect", () => {
+    vi.useFakeTimers();
+    const { client, sockets, factory } = createTrackedClient();
+    client.connect();
+    sockets[0]!.emit("close", {});
+    client.dispose();
+    vi.advanceTimersByTime(10_000);
+    expect(factory).toHaveBeenCalledTimes(1);
+  });
+
+  it("connect after dispose revives the client", () => {
+    const { client, sockets, factory } = createTrackedClient();
+    client.connect();
+    client.dispose();
+    client.connect();
+    expect(factory).toHaveBeenCalledTimes(2);
+    sockets[1]!.emit("open", {});
+    expect(client.getSnapshot().connected).toBe(true);
     client.dispose();
   });
 });
