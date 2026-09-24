@@ -71,4 +71,20 @@ describe("reduceEvent", () => {
     expect(state.isStreaming).toBe(false);
     expect(state.streamingMessage).toBeUndefined();
   });
+
+  it("clears errorMessage when a new run starts", () => {
+    const failed: AssistantMessage = {
+      ...assistantMessage,
+      stopReason: "error",
+      errorMessage: "boom",
+    };
+    let state = reduceEvent(emptyState(), {
+      type: "turn_end",
+      message: failed,
+      toolResults: [],
+    });
+    expect(state.errorMessage).toBe("boom");
+    state = reduceEvent(state, { type: "agent_start" });
+    expect(state.errorMessage).toBeUndefined();
+  });
 });
