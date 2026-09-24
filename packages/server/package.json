@@ -1,0 +1,19 @@
+{
+  "name": "@mini-agent/server",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node --experimental-strip-types --watch src/index.ts",
+    "test": "node --experimental-strip-types --test test/*.test.ts",
+    "check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@mini-agent/core": "workspace:*",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "22.19.19",
+    "@types/ws": "^8.5.10",
+    "typescript": "5.9.3"
+  }
+}
