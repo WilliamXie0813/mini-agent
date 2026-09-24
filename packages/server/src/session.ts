@@ -19,10 +19,11 @@ export function createAgent(): Agent {
 export class AgentSession {
   private readonly clients = new Set<WebSocket>();
   private readonly agent: Agent;
+  private readonly unsubscribe: () => void;
 
   constructor(agent: Agent) {
     this.agent = agent;
-    this.agent.subscribe((event) => {
+    this.unsubscribe = this.agent.subscribe((event) => {
       this.broadcast({ type: "event", event });
       // 低频状态重发：保证队列/pendingToolCalls 等面板数据实时
       if (event.type === "turn_end" || event.type === "agent_end") {
@@ -42,7 +43,13 @@ export class AgentSession {
       socket.on("close", () => {
         this.clients.delete(socket);
       });
+      socket.on("error", () => {});
     });
+  }
+
+  dispose(): void {
+    this.unsubscribe();
+    this.clients.clear();
   }
 
   private handleMessage(socket: WebSocket, raw: string): void {

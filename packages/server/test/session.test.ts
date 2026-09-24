@@ -124,6 +124,7 @@ test("a second prompt while busy yields an error message", async () => {
       context.received,
       (m) => m.type === "event" && m.event.type === "agent_start",
     );
+    // Relies on the first run still streaming (mock answer ~16 chars × 30ms delay).
     context.socket.send(
       JSON.stringify({ type: "prompt", content: "又来一次" }),
     );
