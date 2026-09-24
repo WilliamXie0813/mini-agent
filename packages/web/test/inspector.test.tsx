@@ -29,7 +29,7 @@ describe("InspectorPanel", () => {
     render(
       <InspectorPanel
         state={emptyState()}
-        events={[{ event: { type: "agent_start" }, receivedAt: 1 }]}
+        events={[{ event: { type: "agent_start" }, receivedAt: 1, seq: 0 }]}
       />,
     );
     expect(screen.getByText("agent_start")).toBeInTheDocument();

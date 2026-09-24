@@ -1,3 +1,19 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+/* antd Tabs does not propagate bounded height on its own; without this the
+   inspector tab panes grow past the panel instead of scrolling. */
+.inspector-tabs,
+.inspector-tabs .ant-tabs-content-holder,
+.inspector-tabs .ant-tabs-content,
+.inspector-tabs .ant-tabs-tabpane {
+  height: 100%;
+  min-height: 0;
+}
+
+/* Rotate the disclosure marker when the event row is expanded. */
+details[open] > summary .disclosure-marker {
+  display: inline-block;
+  transform: rotate(90deg);
+}

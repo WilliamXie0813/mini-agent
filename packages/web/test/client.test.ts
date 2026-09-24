@@ -88,6 +88,17 @@ describe("AgentClient", () => {
     client.dispose();
   });
 
+  it("assigns distinct increasing seq values to received events", () => {
+    const { client, socket } = createClient();
+    client.connect();
+    socket.emit("open", {});
+    socket.receive({ type: "event", event: { type: "agent_start" } });
+    socket.receive({ type: "event", event: { type: "agent_end", messages: [] } });
+    const events = client.getSnapshot().events;
+    expect(events.map((stored) => stored.seq)).toEqual([0, 1]);
+    client.dispose();
+  });
+
   it("stores server error messages as lastError", () => {
     const { client, socket } = createClient();
     client.connect();

@@ -17,7 +17,7 @@ export function InspectorPanel({
   return (
     <div className="flex w-96 shrink-0 flex-col border-l border-gray-200">
       <Tabs
-        className="flex-1 px-3"
+        className="inspector-tabs flex-1 min-h-0 px-3"
         defaultActiveKey={defaultActiveKey}
         items={[
           {
@@ -29,7 +29,7 @@ export function InspectorPanel({
             key: "messages",
             label: "消息历史",
             children: (
-              <pre className="overflow-auto text-xs">
+              <pre className="h-full overflow-auto text-xs">
                 {JSON.stringify(state.messages, null, 2)}
               </pre>
             ),
@@ -38,7 +38,7 @@ export function InspectorPanel({
             key: "queues",
             label: "队列与状态",
             children: (
-              <div className="text-xs">
+              <div className="h-full overflow-y-auto text-xs">
                 <h4 className="mt-2 font-medium">steering 队列</h4>
                 <pre>{JSON.stringify(state.queues.steering, null, 2)}</pre>
                 <h4 className="mt-2 font-medium">followUp 队列</h4>

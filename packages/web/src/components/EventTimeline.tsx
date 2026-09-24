@@ -16,13 +16,16 @@ const eventColors: Record<string, string> = {
 
 export function EventTimeline({ events }: { events: StoredEvent[] }) {
   return (
-    <div className="flex flex-col gap-1 overflow-y-auto py-2">
-      {[...events].reverse().map((stored, index) => (
+    <div className="flex h-full flex-col gap-1 overflow-y-auto py-2">
+      {[...events].reverse().map((stored) => (
         <details
-          key={index}
+          key={stored.seq}
           className="rounded border border-gray-200 px-2 py-1 text-xs"
         >
           <summary className="flex cursor-pointer items-center gap-2">
+            <span aria-hidden="true" className="disclosure-marker">
+              ▸
+            </span>
             <Tag
               color={eventColors[stored.event.type] ?? "default"}
               className="m-0"

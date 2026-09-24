@@ -9,6 +9,8 @@ import { emptyState, reduceEvent } from "./reducer";
 export interface StoredEvent {
   event: AgentEvent;
   receivedAt: number;
+  /** Monotonic per-client id so reversed live lists keep stable React keys. */
+  seq: number;
 }
 
 export interface ClientSnapshot {
@@ -43,6 +45,7 @@ export class AgentClient {
   private socket?: WebSocketLike;
   private reconnectTimer?: ReturnType<typeof setTimeout>;
   private reconnectAttempts = 0;
+  private nextSeq = 0;
 
   constructor(url: string, createSocket?: WebSocketFactory) {
     this.url = url;
@@ -130,7 +133,11 @@ export class AgentClient {
       case "event": {
         const events = [
           ...this.snapshot.events,
-          { event: message.event, receivedAt: Date.now() },
+          {
+            event: message.event,
+            receivedAt: Date.now(),
+            seq: this.nextSeq++,
+          },
         ].slice(-MAX_STORED_EVENTS);
         this.update({
           state: reduceEvent(this.snapshot.state, message.event),
