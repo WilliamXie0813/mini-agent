@@ -41,3 +41,14 @@ test("parseCommand rejects malformed payloads", () => {
   assert.equal(parseCommand('{"type":"nope"}'), undefined);
   assert.equal(parseCommand("42"), undefined);
 });
+
+test("serializeState omits undefined optional keys but includes defined ones", () => {
+  const absent = serializeState(fakeState(), { steering: [], followUp: [] });
+  assert.equal("streamingMessage" in absent, false);
+  assert.equal("errorMessage" in absent, false);
+  const present = serializeState(
+    fakeState({ errorMessage: "boom" }),
+    { steering: [], followUp: [] },
+  );
+  assert.equal(present.errorMessage, "boom");
+});
