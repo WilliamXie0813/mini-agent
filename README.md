@@ -5,19 +5,20 @@ This project is a zero-runtime-dependency teaching implementation of a tool-usin
 ## Run
 
 ```bash
-npm run demo
-npm test
-npm run check
+pnpm install
+pnpm run demo
+pnpm test
+pnpm run check
 ```
 
 ## Read in this order
 
-1. `src/types.ts`
-2. `src/mock-llm.ts`
-3. `src/tools.ts`
-4. `src/agent-loop.ts`
-5. `src/agent.ts`
-6. `src/demo.ts`
+1. `packages/core/src/types.ts`
+2. `packages/core/src/mock-llm.ts`
+3. `packages/core/src/tools.ts`
+4. `packages/core/src/agent-loop.ts`
+5. `packages/core/src/agent.ts`
+6. `packages/core/src/demo.ts`
 
 ## Core flow
 
@@ -57,3 +58,14 @@ Add three separate hooks:
 ### Persistence
 
 Add a `SessionStore` interface with `load()` and atomic `append()` operations. Keep persistence outside the model adapter and tool implementations.
+
+## Web UI 开发
+
+```bash
+pnpm install
+pnpm dev    # 同时启动 server (:3001) 与 web (:5173)
+pnpm test   # 运行全部包的测试
+pnpm check  # 全部包的类型检查
+```
+
+浏览器打开 http://localhost:5173 。生产模式下 `pnpm --filter @mini-agent/web run build` 后，server (:3001) 会直接托管 `packages/web/dist`。
