@@ -63,8 +63,11 @@ export default function App() {
     });
   }, [resetCount]);
 
-  const turnCount = events.filter(
-    (stored) => stored.event.type === "turn_start",
+  // 每个 turn 恰好产出一条 assistant 消息；从消息历史推导轮次数，
+  // 而不是数本次连接收到的 turn_start 事件——刷新页面后服务端会重发
+  // 消息历史但不回放事件，数事件会导致轮次归零、与聊天区自相矛盾。
+  const turnCount = state.messages.filter(
+    (message) => message.role === "assistant",
   ).length;
 
   return (

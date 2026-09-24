@@ -33,11 +33,13 @@ export function Composer({
           onChange={(event) => setContent(event.target.value)}
           placeholder={
             isStreaming
-              ? "Agent 运行中：可以 Steer 或 FollowUp…"
+              ? "Agent 运行中：可以插话（Steer）或排队（FollowUp）…"
               : "输入消息…"
           }
           autoSize={{ minRows: 2, maxRows: 6 }}
-          aria-label={isStreaming ? "Steer 或 FollowUp 消息" : "输入消息"}
+          aria-label={
+            isStreaming ? "插话（Steer）或排队（FollowUp）消息" : "输入消息"
+          }
           onPressEnter={(event) => {
             const native = event.nativeEvent as KeyboardEvent;
             if (native.isComposing || native.keyCode === 229) return;
@@ -54,7 +56,7 @@ export function Composer({
               </Button>
               <Tooltip title="立即打断当前输出，把这条消息插入正在运行的回合">
                 <Button disabled={!ready} onClick={() => submit(onSteer)}>
-                  Steer
+                  插话 · Steer
                 </Button>
               </Tooltip>
               <Tooltip title="不打断当前回合，排队等本轮结束后再发送">
@@ -63,7 +65,7 @@ export function Composer({
                   disabled={!ready}
                   onClick={() => submit(onFollowUp)}
                 >
-                  FollowUp
+                  排队 · FollowUp
                 </Button>
               </Tooltip>
             </>

@@ -23,11 +23,16 @@ export function InspectorPanel({
           {
             key: "events",
             label: `事件流 (${events.length})`,
-            children: <EventTimeline events={events} />,
+            children: (
+              <EventTimeline
+                events={events}
+                hasHistory={state.messages.length > 0}
+              />
+            ),
           },
           {
             key: "messages",
-            label: `消息历史 (${state.messages.length})`,
+            label: `消息历史 (${state.messages.filter((m) => m.role !== "system").length})`,
             children: (
               <pre className="h-full overflow-auto whitespace-pre-wrap break-all text-xs">
                 {JSON.stringify(state.messages, null, 2)}

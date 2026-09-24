@@ -57,6 +57,16 @@ describe("EventTimeline", () => {
     expect(screen.getByText("agent_start")).toBeInTheDocument();
   });
 
+  it("shows a first-run hint when there are no events and no history", () => {
+    render(<EventTimeline events={[]} />);
+    expect(screen.getByText(/还没有事件/)).toBeInTheDocument();
+  });
+
+  it("explains the per-connection scope when history exists but events are empty", () => {
+    render(<EventTimeline events={[]} hasHistory />);
+    expect(screen.getByText(/仅记录本次连接期间的事件/)).toBeInTheDocument();
+  });
+
   it("shows millisecond-precision timestamps", () => {
     const ts = new Date(2026, 0, 1, 12, 30, 45, 123).getTime();
     render(<EventTimeline events={[stored("agent_start", ts)]} />);

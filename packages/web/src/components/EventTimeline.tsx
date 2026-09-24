@@ -1,4 +1,5 @@
 import { Tag } from "antd";
+import { useEffect, useRef } from "react";
 import type { StoredEvent } from "../state/client";
 
 const eventColors: Record<string, string> = {
@@ -13,6 +14,9 @@ const eventColors: Record<string, string> = {
   tool_execution_update: "cyan",
   tool_execution_end: "cyan",
 };
+
+/** Distance from the bottom (px) within which the view still counts as pinned. */
+const PIN_THRESHOLD = 48;
 
 /** 毫秒级时间戳：流式事件同秒密集发生，秒级无法区分顺序。 */
 function formatTime(timestamp: number): string {
@@ -144,17 +148,57 @@ function TurnGroup({
   );
 }
 
-export function EventTimeline({ events }: { events: StoredEvent[] }) {
+interface EventTimelineProps {
+  events: StoredEvent[];
+  /** 服务端有历史消息但本次连接尚未收到事件（如刷新后）时为 true。 */
+  hasHistory?: boolean;
+}
+
+export function EventTimeline({ events, hasHistory }: EventTimelineProps) {
   const blocks = groupBlocks(events);
-  // 最新轮次块默认展开。注意不能用反转后的 position===0：agent_end 等
-  // 独立事件排在轮次块之后，会把最新轮次顶到 position 1。
+  // 最新轮次块默认展开。注意不能按展示序取第一个：agent_end 等独立
+  // 事件排在轮次块之后，正序展示时最新轮次不在最顶/最底。
   const lastTurn = [...blocks]
     .reverse()
     .find((block): block is TurnBlock => block.kind === "turn");
 
+  // 新事件钉底跟随（与聊天区行为一致）；用户上翻离开底部时暂停跟随。
+  // hooks 必须在空态 early return 之前声明。
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const pinnedRef = useRef(true);
+
+  const handleScroll = () => {
+    const el = scrollRef.current;
+    if (!el) return;
+    pinnedRef.current =
+      el.scrollHeight - el.scrollTop - el.clientHeight < PIN_THRESHOLD;
+  };
+
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (el && pinnedRef.current) {
+      el.scrollTop = el.scrollHeight;
+    }
+  }, [events]);
+
+  if (events.length === 0) {
+    return (
+      <div className="flex h-full items-center justify-center px-4 text-center text-xs text-stone-400">
+        {hasHistory
+          ? "事件流仅记录本次连接期间的事件；此前的历史请看「消息历史」标签页。"
+          : "还没有事件。发一条消息，这里会实时显示 agent 的每一步。"}
+      </div>
+    );
+  }
+
+  // 正序排列，从上往下讲故事
   return (
-    <div className="flex h-full flex-col gap-1 overflow-y-auto py-2">
-      {[...blocks].reverse().map((block) =>
+    <div
+      ref={scrollRef}
+      onScroll={handleScroll}
+      className="flex h-full flex-col gap-1 overflow-y-auto py-2"
+    >
+      {blocks.map((block) =>
         block.kind === "turn" ? (
           <TurnGroup
             key={block.events[0]!.seq}

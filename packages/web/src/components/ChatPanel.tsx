@@ -62,7 +62,7 @@ export function ChatPanel({ state, onExample }: ChatPanelProps) {
                 一个会调用工具的教学 Agent
               </p>
               <p className="mt-1 text-sm text-stone-500">
-                发消息即可开始；点右上角「显示检查器」，能看到每一步的内部事件。
+                发消息即可开始；打开检查器能看到 agent 每一步的内部事件。
               </p>
             </div>
             <div className="flex flex-wrap justify-center gap-2">

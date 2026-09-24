@@ -27,8 +27,8 @@ describe("Composer", () => {
   it("shows steer / followUp / abort controls while streaming", () => {
     renderComposer(true);
     expect(screen.getByRole("button", { name: /中\s*止/ })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Steer" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "FollowUp" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "插话 · Steer" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "排队 · FollowUp" })).toBeInTheDocument();
   });
 
   it("emits onPrompt with trimmed content and clears the input", () => {
@@ -44,10 +44,10 @@ describe("Composer", () => {
   it("emits onFollowUp while streaming", () => {
     const props = renderComposer(true);
     fireEvent.change(
-      screen.getByPlaceholderText("Agent 运行中：可以 Steer 或 FollowUp…"),
+      screen.getByPlaceholderText("Agent 运行中：可以插话（Steer）或排队（FollowUp）…"),
       { target: { value: "稍后继续" } },
     );
-    fireEvent.click(screen.getByRole("button", { name: "FollowUp" }));
+    fireEvent.click(screen.getByRole("button", { name: "排队 · FollowUp" }));
     expect(props.onFollowUp).toHaveBeenCalledWith("稍后继续");
   });
 
@@ -88,7 +88,7 @@ describe("Composer", () => {
   it("routes Enter to onSteer while streaming", () => {
     const props = renderComposer(true);
     const textarea = screen.getByPlaceholderText(
-      "Agent 运行中：可以 Steer 或 FollowUp…",
+      "Agent 运行中：可以插话（Steer）或排队（FollowUp）…",
     );
     fireEvent.change(textarea, { target: { value: "纠正一下" } });
     fireEvent.keyDown(textarea, { key: "Enter", shiftKey: false });
