@@ -1,3 +1,10 @@
+/**
+ * index.ts — 包的公共出口
+ *
+ * 只 re-export 对外的稳定 API：Agent、Mock 流工厂、read 工具工厂和全部公共类型。
+ * agent-loop 的 runAgentLoop 不导出——循环编排是内部实现细节，
+ * 外部始终通过 Agent 的有状态 API 交互。
+ */
 export { Agent } from "./agent.ts";
 export type { AgentOptions } from "./agent.ts";
 export { createMockStream } from "./mock-llm.ts";
