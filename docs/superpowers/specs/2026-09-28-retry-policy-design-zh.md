@@ -122,11 +122,11 @@ export type SleepFn = (ms: number, signal: AbortSignal) => Promise<void>;
 
 ```ts
 export interface DefaultRetryPolicyOptions {
-  /** 含首次尝试在内的最大尝试次数，默认 3。 */
-  maxAttempts?: number;
-  /** 退避基数，默认 250ms。 */
+  /** 最大重试次数（不含首次尝试），默认 3，即总共最多 4 次尝试。 */
+  maxRetries?: number;
+  /** 退避基数，默认 2_000ms。 */
   baseDelayMs?: number;
-  /** 指数因子，默认 2（得到 250 / 500 / 1000）。 */
+  /** 指数因子，默认 2（得到 2s / 4s / 8s）。 */
   factor?: number;
   /** 单次延迟上限，默认 10_000ms。 */
   maxDelayMs?: number;
@@ -143,10 +143,12 @@ export function createDefaultRetryPolicy(
 ): RetryPolicy;
 ```
 
+默认值与 pi coding-agent 的 `settings.retry` 对齐（`maxRetries: 3`、`baseDelayMs: 2000`），默认退避序列为 2s / 4s / 8s；pi 的 Turn 级重试没有 jitter 和总预算，本设计保留这两者作为额外保护（默认值不会截断默认序列：2+4+8s 远小于 30s 预算）。
+
 决策规则按顺序短路：
 
 1. `error.retryable === false` → `{ retry: false }`；
-2. `attempt + 1 > maxAttempts` → `{ retry: false }`；
+2. `attempt > maxRetries` → `{ retry: false }`（`attempt` 是刚失败的尝试编号，1 表示首次尝试失败）；
 3. `delay = min(error.retryAfterMs ?? baseDelayMs × factor^(attempt-1), maxDelayMs)`；
 4. 乘上 jitter：`delay × (1 + jitterRatio × (2 × random() - 1))`；
 5. `elapsedMs + delay > maxTotalDelayMs` → `{ retry: false }`；
@@ -215,6 +217,12 @@ for await (const modelEvent of stream) { /* 现有逻辑不变 */ }
 
 `start` 事件已被 Loop 转译成 `message_start` 发给订阅者，`text_delta` / `tool_call` 已变成 `message_update`。这些事件不能装作没发生：UI 已经开始渲染这条消息，Web 客户端可能已经转发。教学版因此不重试已锁定的尝试，失败直接进入现有的 `emitFailure` 通道，产生一条 `stopReason: "error"` 的 Assistant Message。带 `attemptId` 的透明重试是进阶方案，本阶段明确不做。
 
+### 已知的替代方案：Turn 级 pop-重试（pi 的做法）
+
+pi（coding-agent）选择了另一条路：它把重试放在整个 Assistant Turn 完成之后判断（`stopReason === "error"` 且错误文案命中可重试正则），重试前**把 error assistant 消息从 agent state 中 pop 掉**（session 历史仍保留），然后整体重跑该 Turn。这样流式输出到一半的失败也能重试。
+
+代价是 UI 必须容忍一条 assistant 消息出现后又消失，且错误分类退化为对 errorMessage 的正则匹配（约 40 条模式，配额/账单类优先判不可重试）。教学版不采用：首事件锁定的语义更容易推理，且不需要「消息出现又消失」的 UI 契约。如果未来要支持流式失败后重试，方向是 pi 这种 Turn 级重跑，而不是在 `streamWithRetry` 里放开锁定。
+
 ## 新事件
 
 ```ts
@@ -278,7 +286,7 @@ export interface Tool<TParameters> {
 策略拒绝或达到上限后抛出的 `ModelError` 由 `emitFailure` 变成 error Assistant Message。为了让 UI 直接可读，`streamWithRetry` 在确实尝试过多次后放弃时（`attempt > 1`）重写错误文案：
 
 ```text
-network error after 3 attempts: connection reset
+network error after 4 attempts: connection reset
 ```
 
 首次尝试即失败时（不可重试错误，或首次失败就被预算拒绝）保持原文案，不加 "after 1 attempt" 噪音。
@@ -335,9 +343,9 @@ network error after 3 attempts: connection reset
 
 ### 策略单元测试（确定性）
 
-1. 默认参数（`maxAttempts: 3`）下实际退避为 250 / 500；配置 `maxAttempts: 4` 时序列为 250 / 500 / 1000（注入 `random: () => 0.5` 使 jitter 恒为 1，断言精确值）。
+1. 默认参数（`maxRetries: 3`、`baseDelayMs: 2000`）下退避序列为 2000 / 4000 / 8000（注入 `random: () => 0.5` 使 jitter 恒为 1，断言精确值）。
 2. `retryable: false` 的错误一律拒绝。
-3. `attempt + 1 > maxAttempts` 拒绝。
+3. `attempt > maxRetries` 拒绝（默认配置下第 4 次尝试失败后拒绝，即首次 + 3 次重试）。
 4. `retryAfterMs` 覆盖指数退避，但不超过 `maxDelayMs`。
 5. 累计延迟超过 `maxTotalDelayMs` 拒绝。
 6. jitter 比例生效：`random()` 两端值分别给出 ±10% 的延迟。
@@ -349,7 +357,7 @@ network error after 3 attempts: connection reset
 9. 产出 `start` 后即抛错也视为锁定，不重试。
 10. 非 ModelError 异常包装为 `unknown` 且不重试。
 11. 等待期间 abort：sleep reject，不发射 `model_retry_started`，不开始下一尝试。
-12. 达到 `maxAttempts` 后抛出的错误文案含尝试次数。
+12. 达到 `maxRetries` 上限后抛出的错误文案含尝试次数（默认配置下为 4 次尝试）。
 13. 每次尝试收到的 `messages` 是同一份请求（引用相等）。
 
 ### Loop 集成测试
