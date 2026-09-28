@@ -295,6 +295,86 @@ test("unsafe ready tools downgrade the whole batch", async () => {
   }
 });
 
+test("immediate calls do not force a safe batch to downgrade", async () => {
+  const first = deferred<ToolExecutionResult>();
+  const second = deferred<ToolExecutionResult>();
+  const bothStarted = deferred<void>();
+  const started: string[] = [];
+  const running = executeToolCallBatch(
+    [
+      toolCall("missing", "missing"),
+      toolCall("a"),
+      toolCall("b"),
+    ],
+    {
+      ...options({
+        tools: [
+          createTool("a", async () => {
+            started.push("a");
+            if (started.length === 2) bothStarted.resolve();
+            return first.promise;
+          }),
+          createTool("b", async () => {
+            started.push("b");
+            if (started.length === 2) bothStarted.resolve();
+            return second.promise;
+          }),
+        ],
+      }),
+      toolExecutionMode: "parallel",
+      maxConcurrency: 2,
+    },
+  );
+
+  await bothStarted.promise;
+  assert.deepEqual(started, ["a", "b"]);
+  first.resolve({ content: "a" });
+  second.resolve({ content: "b" });
+  const batch = await running;
+  assert.deepEqual(
+    batch.messages.map((message) => message.toolCallId),
+    ["missing", "a", "b"],
+  );
+});
+
+test("parallel mode with maxConcurrency one does not overlap ready calls", async () => {
+  const first = deferred<ToolExecutionResult>();
+  const firstStarted = deferred<void>();
+  let active = 0;
+  let peak = 0;
+  const running = executeToolCallBatch(
+    [toolCall("a"), toolCall("b")],
+    {
+      ...options({
+        tools: [
+          createTool("a", async () => {
+            active += 1;
+            peak = Math.max(peak, active);
+            firstStarted.resolve();
+            const result = await first.promise;
+            active -= 1;
+            return result;
+          }),
+          createTool("b", async () => {
+            active += 1;
+            peak = Math.max(peak, active);
+            active -= 1;
+            return { content: "b" };
+          }),
+        ],
+      }),
+      toolExecutionMode: "parallel",
+      maxConcurrency: 1,
+    },
+  );
+
+  await firstStarted.promise;
+  assert.equal(active, 1);
+  first.resolve({ content: "a" });
+  await running;
+  assert.equal(peak, 1);
+});
+
 test("EventSink and afterToolCall remain serial", async () => {
   let activeEvents = 0;
   let peakEvents = 0;

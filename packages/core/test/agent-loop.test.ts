@@ -343,6 +343,20 @@ test("parallel tools emit completion order but commit model source order", async
       .map((message) => message.toolCallId),
     ["a", "b"],
   );
+  assert.deepEqual(
+    events
+      .filter(
+        (event) =>
+          event.type === "message_end" &&
+          event.message.role === "toolResult",
+      )
+      .map((event) =>
+        event.type === "message_end" && event.message.role === "toolResult"
+          ? event.message.toolCallId
+          : "",
+      ),
+    ["a", "b"],
+  );
 });
 
 test("unknown tool becomes an explicit error tool result", async () => {
