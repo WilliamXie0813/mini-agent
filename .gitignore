@@ -33,5 +33,8 @@ Thumbs.db
 .eslintcache
 .superpowers/
 
+# Session data
+.mini-agent/
+
 # Worktrees
 .worktrees/

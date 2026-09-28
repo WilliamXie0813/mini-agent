@@ -1,10 +1,14 @@
 import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
 import {
+  JsonlSessionStore,
   MemorySessionStore,
   openOrCreateSession,
   type SessionStore,
 } from "@mini-agent/core";
 import { createServer, type Server } from "node:http";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import { WebSocket, WebSocketServer } from "ws";
 import { SessionManager } from "../src/session-manager.ts";
@@ -275,6 +279,51 @@ test("default session remains compatible without an explicit open command", asyn
     );
   } finally {
     await cleanup(context);
+  }
+});
+
+test("restart through JSONL restores the committed transcript exactly once", async () => {
+  const root = await mkdtemp(join(tmpdir(), "mini-agent-restart-"));
+  try {
+    const first = await connect(new JsonlSessionStore(root));
+    try {
+      first.socket.send(JSON.stringify({ type: "prompt", content: "你好" }));
+      await waitFor(
+        first.received,
+        (m) => m.type === "event" && m.event.type === "agent_end",
+      );
+    } finally {
+      await cleanup(first);
+    }
+
+    const second = await connect(new JsonlSessionStore(root));
+    try {
+      const state = await waitFor(
+        second.received,
+        (m) =>
+          m.type === "state" &&
+          m.state.messages.some((message) => message.role === "user"),
+      );
+      assert.equal(state.type, "state");
+      assert.equal(
+        state.state.messages.filter((message) => message.role === "user")
+          .length,
+        1,
+      );
+      assert.equal(
+        state.state.messages.filter((message) => message.role === "assistant")
+          .length,
+        1,
+      );
+      assert.equal(
+        new Set(state.state.messages.map((message) => message.id)).size,
+        state.state.messages.length,
+      );
+    } finally {
+      await cleanup(second);
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
   }
 });
 

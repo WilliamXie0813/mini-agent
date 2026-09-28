@@ -163,6 +163,19 @@ export class SessionSocketServer {
   }
 
   private async handleConnection(socket: WebSocket): Promise<void> {
+    // 会话打开是异步的（持久化 store 可能涉及磁盘 I/O），而客户端可能在
+    // 连接建立后立刻发命令；先同步挂 message 监听并把早到的命令缓存起来，
+    // 绑定完成后再按序补发，否则这些命令会被静默丢弃。
+    const pending: string[] = [];
+    let bound = false;
+    socket.on("message", (data) => {
+      if (bound) {
+        this.handleMessage(socket, data.toString());
+      } else {
+        pending.push(data.toString());
+      }
+    });
+    socket.on("error", () => {});
     let session: AgentSession;
     try {
       session = await this.manager.getOrOpen("default");
@@ -177,15 +190,16 @@ export class SessionSocketServer {
     if (socket.readyState !== socket.OPEN) return;
     session.addClient(socket);
     this.bindings.set(socket, session);
-    session.sendInitialState(socket);
-    socket.on("message", (data) => {
-      this.handleMessage(socket, data.toString());
-    });
+    bound = true;
     socket.on("close", () => {
       this.bindings.get(socket)?.removeClient(socket);
       this.bindings.delete(socket);
     });
-    socket.on("error", () => {});
+    session.sendInitialState(socket);
+    for (const raw of pending) {
+      this.handleMessage(socket, raw);
+    }
+    pending.length = 0;
   }
 
   private handleMessage(socket: WebSocket, raw: string): void {

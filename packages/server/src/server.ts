@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { createServer } from "node:http";
-import { extname, join, normalize, sep } from "node:path";
+import { extname, join, normalize, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { WebSocketServer } from "ws";
 import { JsonlSessionStore } from "@mini-agent/core";
@@ -9,6 +9,7 @@ import { SessionSocketServer, createAgent } from "./session.ts";
 
 const PORT = Number(process.env.PORT ?? 3001);
 const HOST = process.env.HOST ?? "127.0.0.1";
+const DATA_DIR = resolve(process.env.MINI_AGENT_DATA_DIR ?? "./.mini-agent");
 const webDist = fileURLToPath(new URL("../../web/dist", import.meta.url));
 
 const contentTypes: Record<string, string> = {
@@ -60,16 +61,14 @@ server.on("error", (error: NodeJS.ErrnoException) => {
 });
 
 const wss = new WebSocketServer({ server, path: "/ws" });
-const manager = new SessionManager(
-  new JsonlSessionStore(fileURLToPath(new URL("./data", import.meta.url))),
-  (options) => createAgent(options),
-);
-const router = new SessionSocketServer(manager);
-router.attach(wss);
+const store = new JsonlSessionStore(DATA_DIR);
+const manager = new SessionManager(store, (options) => createAgent(options));
+const socketServer = new SessionSocketServer(manager);
+socketServer.attach(wss);
 
 function shutdown(): void {
   console.log("Shutting down…");
-  router.dispose();
+  socketServer.dispose();
   manager.dispose();
   for (const client of wss.clients) {
     client.terminate();

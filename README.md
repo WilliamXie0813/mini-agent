@@ -69,3 +69,5 @@ pnpm check  # 全部包的类型检查
 ```
 
 浏览器打开 http://localhost:5173 。生产模式下 `pnpm --filter @mini-agent/web run build` 后，server (:3001) 会直接托管 `packages/web/dist`。
+
+- `MINI_AGENT_DATA_DIR`：Session 数据目录（绝对或相对路径），默认 `./.mini-agent`；Session 文件保存在 `<dataDir>/sessions/<sessionId>.jsonl`。
