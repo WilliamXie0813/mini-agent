@@ -121,6 +121,44 @@ test("system messages split compacted segments without moving", async () => {
   );
 });
 
+test("compaction ids stay distinct when segment tails share a timestamp", async () => {
+  const messages: AgentMessage[] = [
+    { id: "system-1", role: "system", content: "system", timestamp: 1 },
+    { id: "user-old-1", role: "user", content: "old one", timestamp: 2 },
+    {
+      id: "assistant-old-1",
+      role: "assistant",
+      content: [{ type: "text", text: "answer one" }],
+      stopReason: "stop",
+      timestamp: 2,
+    },
+    { id: "system-mid", role: "system", content: "mid", timestamp: 2 },
+    { id: "user-old-2", role: "user", content: "old two", timestamp: 2 },
+    {
+      id: "assistant-old-2",
+      role: "assistant",
+      content: [{ type: "text", text: "answer two" }],
+      stopReason: "stop",
+      timestamp: 2,
+    },
+  ];
+  const transform = createDeterministicCompactingTransform({
+    maxInputTokens: 5,
+    preserveRecentTurns: 0,
+    estimator: messageCountEstimator(),
+  });
+  const result = await transform(messages, new AbortController().signal);
+  const compactionIds = result
+    .filter(
+      (message) =>
+        message.role === "system" &&
+        message.content.startsWith("[Earlier context compacted]"),
+    )
+    .map((message) => message.id);
+  assert.equal(compactionIds.length, 2);
+  assert.notEqual(compactionIds[0], compactionIds[1]);
+});
+
 test("compaction reports tools and rejects impossible budgets", async () => {
   const messages: AgentMessage[] = [
     { id: "user-old", role: "user", content: "old", timestamp: 1 },
