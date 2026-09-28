@@ -248,3 +248,47 @@ test("jsonl store ignores only a truncated final line", async () => {
   assert.equal(snapshot.messages.length, 1);
   assert.equal(snapshot.loadDiagnostics[0]?.kind, "truncated_tail");
 });
+
+test("stores reject appending to a missing session", async () => {
+  for (const { store } of await storeFactories()) {
+    await assert.rejects(
+      store.append("missing", [
+        {
+          type: "commit",
+          sequence: 1,
+          timestamp: "2026-09-28T00:00:01.000Z",
+          operations: [],
+        },
+      ]),
+      SessionNotFoundError,
+    );
+  }
+});
+
+test("stores reject duplicate create", async () => {
+  for (const { store } of await storeFactories()) {
+    await store.create(metadata("duplicate"));
+    await assert.rejects(store.create(metadata("duplicate")), /already exists/);
+  }
+});
+
+test("stores list sessions ordered by updatedAt descending", async () => {
+  for (const { store } of await storeFactories()) {
+    await store.create(metadata("first"));
+    await store.create(metadata("second"));
+    // Only the second-created session gets a commit, so its updatedAt is
+    // later; updatedAt-descending order must differ from insertion order.
+    await store.append("second", [
+      {
+        type: "commit",
+        sequence: 1,
+        timestamp: "2026-09-28T00:00:01.000Z",
+        operations: [],
+      },
+    ]);
+    assert.deepEqual(
+      (await store.list()).map((item) => item.id),
+      ["second", "first"],
+    );
+  }
+});

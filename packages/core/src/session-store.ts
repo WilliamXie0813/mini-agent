@@ -3,6 +3,7 @@ import {
   mkdir,
   readFile,
   readdir,
+  stat,
   writeFile,
 } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
@@ -204,6 +205,10 @@ export class SessionNotFoundError extends Error {
   }
 }
 
+function errorCode(error: unknown): unknown {
+  return error instanceof Error && "code" in error ? error.code : undefined;
+}
+
 export class MemorySessionStore implements SessionStore {
   private readonly sessions = new Map<string, SessionRecord[]>();
   private nextAppendFailure?: Error;
@@ -242,12 +247,26 @@ export class MemorySessionStore implements SessionStore {
   }
 
   async list(): Promise<SessionMetadata[]> {
-    return Promise.all(
+    const metadata = await Promise.all(
       [...this.sessions.keys()].map(async (id) => (await this.load(id)).metadata),
+    );
+    return metadata.sort((left, right) =>
+      right.updatedAt.localeCompare(left.updatedAt),
     );
   }
 }
 
+/**
+ * 基于 JSONL 文件的 SessionStore：每个 session 一个 `<dataDir>/sessions/<id>.jsonl` 文件。
+ *
+ * 语义与约束：
+ * - 只增不改（append-only）：header 记录创建时写入，之后只追加 commit；
+ * - 不做 fsync：进程崩溃最多丢失末尾未刷盘的 commit，但 OS 崩溃可能丢失
+ *   已被 append 确认的记录；
+ * - 容忍损坏：仅文件最后一行允许是被截断的残行（记为 truncated_tail 诊断），
+ *   中间行损坏视为文件损坏，直接抛错；
+ * - sessionId 必须由调用方校验（路径穿越防护在 server 协议层，不在这一层）。
+ */
 export class JsonlSessionStore implements SessionStore {
   private readonly sessionsDir: string;
 
@@ -271,6 +290,11 @@ export class JsonlSessionStore implements SessionStore {
     };
     await writeFile(this.path(metadata.id), `${JSON.stringify(header)}\n`, {
       flag: "wx",
+    }).catch((error: unknown) => {
+      if (errorCode(error) === "EEXIST") {
+        throw new Error(`Session already exists: ${metadata.id}`);
+      }
+      throw error;
     });
   }
 
@@ -279,11 +303,7 @@ export class JsonlSessionStore implements SessionStore {
     try {
       content = await readFile(this.path(sessionId), "utf8");
     } catch (error) {
-      if (
-        error instanceof Error &&
-        "code" in error &&
-        error.code === "ENOENT"
-      ) {
+      if (errorCode(error) === "ENOENT") {
         throw new SessionNotFoundError(sessionId);
       }
       throw error;
@@ -318,11 +338,27 @@ export class JsonlSessionStore implements SessionStore {
     records: readonly SessionRecord[],
   ): Promise<void> {
     if (records.length === 0) return;
-    await appendFile(
-      this.path(sessionId),
-      records.map((record) => `${JSON.stringify(record)}\n`).join(""),
-      "utf8",
-    );
+    try {
+      await stat(this.path(sessionId));
+    } catch (error) {
+      if (errorCode(error) === "ENOENT") {
+        throw new SessionNotFoundError(sessionId);
+      }
+      throw error;
+    }
+    try {
+      await appendFile(
+        this.path(sessionId),
+        records.map((record) => `${JSON.stringify(record)}\n`).join(""),
+        "utf8",
+      );
+    } catch (error) {
+      // The session may have been removed between stat and appendFile.
+      if (errorCode(error) === "ENOENT") {
+        throw new SessionNotFoundError(sessionId);
+      }
+      throw error;
+    }
   }
 
   async list(): Promise<SessionMetadata[]> {
@@ -337,11 +373,7 @@ export class JsonlSessionStore implements SessionStore {
         .map((snapshot) => snapshot.metadata)
         .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
     } catch (error) {
-      if (
-        error instanceof Error &&
-        "code" in error &&
-        error.code === "ENOENT"
-      ) {
+      if (errorCode(error) === "ENOENT") {
         return [];
       }
       throw error;
