@@ -138,7 +138,7 @@ test("steer is delivered at the next Turn boundary", async () => {
   agent.subscribe((event) => {
     if (event.type === "tool_execution_end" && !steered) {
       steered = true;
-      agent.steer("只回答项目名称。");
+      void agent.steer("只回答项目名称。");
     }
   });
 
@@ -155,7 +155,7 @@ test("steer is delivered at the next Turn boundary", async () => {
 
 test("followUp is delivered after the first task naturally completes", async () => {
   const agent = createAgent();
-  agent.followUp("再告诉我版本号。");
+  await agent.followUp("再告诉我版本号。");
 
   await agent.prompt("读取 package.json，并告诉我项目名称。");
 
@@ -170,7 +170,7 @@ test("followUp is delivered after the first task naturally completes", async () 
 test("continue consumes a queued follow-up after an Assistant tail", async () => {
   const agent = createAgent();
   await agent.prompt("普通消息");
-  agent.followUp("再告诉我版本号。");
+  await agent.followUp("再告诉我版本号。");
 
   await agent.continue();
 
@@ -336,9 +336,9 @@ test("waitForIdle settles after the active run finishes", async () => {
 test("reset preserves only the System message and clears queued work", async () => {
   const agent = createAgent();
   await agent.prompt("普通消息");
-  agent.followUp("再告诉我版本号。");
+  await agent.followUp("再告诉我版本号。");
 
-  agent.reset();
+  await agent.reset();
 
   assert.deepEqual(
     agent.state.messages.map((message) => message.role),

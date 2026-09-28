@@ -4,14 +4,14 @@ import { Agent } from "../src/agent.ts";
 import { createMockStream } from "../src/mock-llm.ts";
 import type { AgentMessage } from "../src/types.ts";
 
-test("queuedMessages exposes queued steering and followUp messages", () => {
+test("queuedMessages exposes queued steering and followUp messages", async () => {
   const agent = new Agent({
     systemPrompt: "test",
     stream: createMockStream(),
     tools: [],
   });
-  agent.steer("hello");
-  agent.followUp("later");
+  await agent.steer("hello");
+  await agent.followUp("later");
   assert.deepEqual(
     agent.queuedMessages.steering.map((message) => message.content),
     ["hello"],
@@ -40,7 +40,7 @@ test("steering queued before prompt is included in the first Turn", async () => 
     },
     tools: [],
   });
-  agent.steer("queued steering");
+  await agent.steer("queued steering");
   await agent.prompt("initial");
   assert.deepEqual(
     requests[0]
@@ -60,12 +60,12 @@ test("steering during prepareNextTurn does not consume queued follow-up", async 
     prepareNextTurn: async () => {
       if (!inserted) {
         inserted = true;
-        agent.steer("steering");
+        await agent.steer("steering");
       }
       return undefined;
     },
   });
-  agent.followUp("follow-up");
+  await agent.followUp("follow-up");
   await agent.prompt("initial");
   assert.deepEqual(
     agent.state.messages

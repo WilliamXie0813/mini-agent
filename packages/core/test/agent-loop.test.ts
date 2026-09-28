@@ -41,8 +41,9 @@ test("loop completes user to tool to final answer flow", async () => {
     {
       stream: createMockStream(),
       idGenerator: createIdGenerator(),
-      getSteeringMessages: () => [],
-      getFollowUpMessages: () => [],
+      reserveSteeringMessages: () => [],
+      reserveFollowUpMessages: () => [],
+      acknowledgeReservations: () => {},
       hasSteeringMessages: () => false,
       hasFollowUpMessages: () => false,
       toolExecutionMode: "sequential",
@@ -109,8 +110,9 @@ test("beforeToolCall can block execution", async () => {
     {
       stream: createMockStream(),
       idGenerator: createIdGenerator(),
-      getSteeringMessages: () => [],
-      getFollowUpMessages: () => [],
+      reserveSteeringMessages: () => [],
+      reserveFollowUpMessages: () => [],
+      acknowledgeReservations: () => {},
       hasSteeringMessages: () => false,
       hasFollowUpMessages: () => false,
       toolExecutionMode: "sequential",
@@ -156,8 +158,9 @@ test("afterToolCall can replace a successful result", async () => {
     {
       stream: createMockStream(),
       idGenerator: createIdGenerator(),
-      getSteeringMessages: () => [],
-      getFollowUpMessages: () => [],
+      reserveSteeringMessages: () => [],
+      reserveFollowUpMessages: () => [],
+      acknowledgeReservations: () => {},
       hasSteeringMessages: () => false,
       hasFollowUpMessages: () => false,
       toolExecutionMode: "sequential",
@@ -219,8 +222,9 @@ async function runSingleToolCall(
     {
       stream: createSingleToolCallStream(toolCall),
       idGenerator: createIdGenerator(),
-      getSteeringMessages: () => [],
-      getFollowUpMessages: () => [],
+      reserveSteeringMessages: () => [],
+      reserveFollowUpMessages: () => [],
+      acknowledgeReservations: () => {},
       hasSteeringMessages: () => false,
       hasFollowUpMessages: () => false,
       toolExecutionMode: "sequential",
@@ -315,8 +319,9 @@ test("parallel tools emit completion order but commit model source order", async
     {
       stream: createTwoToolCallStream(),
       idGenerator: createIdGenerator(),
-      getSteeringMessages: () => [],
-      getFollowUpMessages: () => [],
+      reserveSteeringMessages: () => [],
+      reserveFollowUpMessages: () => [],
+      acknowledgeReservations: () => {},
       hasSteeringMessages: () => false,
       hasFollowUpMessages: () => false,
       toolExecutionMode: "parallel",
@@ -460,8 +465,9 @@ test("finishTurn can request exactly one extra context-only Turn", async () => {
     {
       stream: createMockStream(),
       idGenerator: createIdGenerator(),
-      getSteeringMessages: () => [],
-      getFollowUpMessages: () => [],
+      reserveSteeringMessages: () => [],
+      reserveFollowUpMessages: () => [],
+      acknowledgeReservations: () => {},
       hasSteeringMessages: () => false,
       hasFollowUpMessages: () => false,
       toolExecutionMode: "sequential",
@@ -496,8 +502,17 @@ test("finishTurn can stop before a queued follow-up", async () => {
     context,
     {
       stream: createMockStream(),
-      getSteeringMessages: () => [],
-      getFollowUpMessages: () => followUps.splice(0),
+      reserveSteeringMessages: () => [],
+      reserveFollowUpMessages: () => {
+        const [message] = followUps;
+        return message ? [{ queue: "followUp" as const, message }] : [];
+      },
+      acknowledgeReservations: (reservations) => {
+        for (const reservation of reservations) {
+          const index = followUps.indexOf(reservation.message);
+          if (index >= 0) followUps.splice(index, 1);
+        }
+      },
       hasSteeringMessages: () => false,
       hasFollowUpMessages: () => followUps.length > 0,
       idGenerator: createIdGenerator(),
@@ -543,8 +558,9 @@ test("first Turn prepares and transforms request before streaming", async () => 
     {
       stream,
       idGenerator: createIdGenerator(),
-      getSteeringMessages: () => [],
-      getFollowUpMessages: () => [],
+      reserveSteeringMessages: () => [],
+      reserveFollowUpMessages: () => [],
+      acknowledgeReservations: () => {},
       hasSteeringMessages: () => false,
       hasFollowUpMessages: () => false,
       toolExecutionMode: "sequential",
@@ -606,8 +622,9 @@ test("later Turn starts before prepareNextTurn", async () => {
     {
       stream,
       idGenerator: createIdGenerator(),
-      getSteeringMessages: () => [],
-      getFollowUpMessages: () => [],
+      reserveSteeringMessages: () => [],
+      reserveFollowUpMessages: () => [],
+      acknowledgeReservations: () => {},
       hasSteeringMessages: () => false,
       hasFollowUpMessages: () => false,
       toolExecutionMode: "sequential",
@@ -642,8 +659,9 @@ test("CompletedTurn context remains stable after later replacement", async () =>
     {
       stream: createMockStream(),
       idGenerator: createIdGenerator(),
-      getSteeringMessages: () => [],
-      getFollowUpMessages: () => [],
+      reserveSteeringMessages: () => [],
+      reserveFollowUpMessages: () => [],
+      acknowledgeReservations: () => {},
       hasSteeringMessages: () => false,
       hasFollowUpMessages: () => false,
       toolExecutionMode: "sequential",
@@ -676,8 +694,9 @@ function baseLoopConfig(stream: StreamFn) {
   return {
     stream,
     idGenerator: createIdGenerator(),
-    getSteeringMessages: () => [],
-    getFollowUpMessages: () => [],
+    reserveSteeringMessages: () => [],
+    reserveFollowUpMessages: () => [],
+    acknowledgeReservations: () => {},
     hasSteeringMessages: () => false,
     hasFollowUpMessages: () => false,
     toolExecutionMode: "sequential" as const,

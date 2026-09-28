@@ -76,16 +76,16 @@ export class AgentSession {
         await this.agent.prompt(command.content);
         return;
       case "steer":
-        this.agent.steer(command.content);
+        await this.agent.steer(command.content);
         return;
       case "followUp":
-        this.agent.followUp(command.content);
+        await this.agent.followUp(command.content);
         return;
       case "abort":
         this.agent.abort();
         return;
       case "reset":
-        this.agent.reset();
+        await this.agent.reset();
         this.broadcast({ type: "reset" });
         return;
     }

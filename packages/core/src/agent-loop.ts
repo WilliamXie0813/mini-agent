@@ -23,6 +23,7 @@ import type {
   ToolCall,
   ToolResultMessage,
 } from "./types.ts";
+import type { QueuedMessageReservation } from "./session.ts";
 import { executeToolCallBatch } from "./tool-execution.ts";
 import { streamWithRetry } from "./retry.ts";
 
@@ -56,6 +57,19 @@ function cloneAssistant(message: AssistantMessage): AssistantMessage {
 async function emitMessage(message: AgentMessage, emit: EventSink): Promise<void> {
   await emit({ type: "message_start", message });
   await emit({ type: "message_end", message });
+}
+
+/**
+ * 预留并立即确认队列消息：保持与旧 drain 语义一致的顺序——
+ * 消息在 Turn 开始前出队，随后作为本 Turn 的输入被 emit 进历史。
+ * （持久化提交的时机由上层在 Task 6 调整，这里只保证队列一致性。）
+ */
+function takeReservedMessages(
+  config: AgentLoopConfig,
+  reservations: QueuedMessageReservation[],
+): AgentMessage[] {
+  config.acknowledgeReservations(reservations);
+  return reservations.map((reservation) => reservation.message);
 }
 
 /**
@@ -161,7 +175,10 @@ export async function runAgentLoop(
   let firstTurn = true;
   let toolResultsPending = false;
   // Run 启动前已排队的 steering 与初始 prompt 一起进入首 Turn。
-  let pendingMessages = config.getSteeringMessages();
+  let pendingMessages = takeReservedMessages(
+    config,
+    config.reserveSteeringMessages(),
+  );
 
   while (true) {
     if (!firstTurn) {
@@ -177,9 +194,15 @@ export async function runAgentLoop(
       // Hook 可能耗时；返回后再检查队列，期间到达的 steering 不会错过本 Turn。
       pendingMessages = [];
       if (config.hasSteeringMessages()) {
-        pendingMessages = config.getSteeringMessages();
+        pendingMessages = takeReservedMessages(
+          config,
+          config.reserveSteeringMessages(),
+        );
       } else if (!toolResultsPending && config.hasFollowUpMessages()) {
-        pendingMessages = config.getFollowUpMessages();
+        pendingMessages = takeReservedMessages(
+          config,
+          config.reserveFollowUpMessages(),
+        );
       }
     }
     firstTurn = false;

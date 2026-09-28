@@ -12,6 +12,11 @@
  */
 import type { ModelErrorCode } from "./errors.ts";
 import type { RetryPolicy, SleepFn } from "./retry.ts";
+import type {
+  QueuedMessageReservation,
+  SessionCommitter,
+  SessionRecoveryWarning,
+} from "./session.ts";
 
 /** 一条 assistant 消息为什么停下：正常结束 / 请求调工具 / 出错 / 被中止 */
 export type StopReason = "stop" | "toolUse" | "error" | "aborted";
@@ -221,6 +226,11 @@ export type AgentEvent =
       message: AssistantMessage;
       toolResults: ToolResultMessage[];
     }
+  | {
+      /** 观察性事件：恢复 session 时产生的诊断警告，仅透传，不改变状态。 */
+      type: "session_recovery_warning";
+      warnings: readonly SessionRecoveryWarning[];
+    }
   | { type: "agent_end"; messages: AgentMessage[] }; // run 结束，携带完整 transcript
 
 /** 事件回调的签名：所有 emit 都是 await 的，慢订阅者会自然背压到循环 */
@@ -327,18 +337,24 @@ export type FinishTurn = (
 ) => Promise<FinishTurnDecision>;
 
 /**
- * 循环配置：stream 是模型入口，两个 getter 让循环在 Turn 边界“拉取”
- * 排队消息（存储与投递策略分离），三个钩子按生命周期挂载。
+ * 循环配置：stream 是模型入口，reserve/acknowledge 方法让循环在 Turn 边界
+ * 预留并确认排队消息（存储与投递策略分离），sessionCommitter 仅随配置透传，
+ * 三个钩子按生命周期挂载。
  */
 export interface AgentLoopConfig {
   stream: StreamFn;
   idGenerator: IdGenerator;
   retryPolicy?: RetryPolicy;
   sleep?: SleepFn;
-  getSteeringMessages(): AgentMessage[];
-  getFollowUpMessages(): AgentMessage[];
+  reserveSteeringMessages(): QueuedMessageReservation[];
+  reserveFollowUpMessages(): QueuedMessageReservation[];
+  acknowledgeReservations(
+    reservations: readonly QueuedMessageReservation[],
+  ): void;
   hasSteeringMessages(): boolean;
   hasFollowUpMessages(): boolean;
+  /** 持久化入口（可选）：Loop 层暂不直接调用，仅随配置透传。 */
+  sessionCommitter?: SessionCommitter;
   /** Agent 已填充默认值，Loop 和执行器不再自行推断。 */
   toolExecutionMode: ToolExecutionMode;
   /** ready Tool Call 的最大并发生命周期数量。 */

@@ -19,6 +19,12 @@ import { runAgentLoop } from "./agent-loop.ts";
 import { defaultSleep } from "./retry.ts";
 import type { RetryPolicy, SleepFn } from "./retry.ts";
 import type {
+  QueueName,
+  QueuedMessageReservation,
+  SessionCommitter,
+  SessionSnapshot,
+} from "./session.ts";
+import type {
   AfterToolCall,
   AgentContext,
   AgentEvent,
@@ -31,6 +37,7 @@ import type {
   PrepareNextTurn,
   PrepareRequest,
   StreamFn,
+  SystemMessage,
   Tool,
   ToolExecutionMode,
   TransformContext,
@@ -53,6 +60,10 @@ export interface AgentOptions {
   retryPolicy?: RetryPolicy;
   sleep?: SleepFn;
   idGenerator?: IdGenerator;
+  /** 恢复用的快照：与 sessionCommitter 必须同时提供（要么都配，要么都不配）。 */
+  initialSession?: SessionSnapshot;
+  /** 持久化提交入口：steer/followUp/reset 会先落盘再改内存。 */
+  sessionCommitter?: SessionCommitter;
 }
 
 function normalizeMaxToolConcurrency(value: number | undefined): number {
@@ -71,8 +82,10 @@ type Listener = (
 
 /**
  * 极简 FIFO 消息队列。
- * 存储与投递策略分离：drainOne 一次只取一条（默认策略），
+ * 存储与投递策略分离：reserveOne 一次只预留队首一条（默认策略），
  * 扩展版本可以加 "all" 模式（一次取全部）而不改动循环结构。
+ * 预留（reserve）与确认（acknowledge）分离：消息在真正被消费时才出队，
+ * 恢复时可通过 restore 整体回填。
  */
 class MessageQueue {
   private messages: AgentMessage[] = [];
@@ -81,18 +94,29 @@ class MessageQueue {
     this.messages.push(message);
   }
 
-  drainOne(): AgentMessage[] {
-    const first = this.messages.shift();
-    return first ? [first] : [];
+  reserveOne(queue: QueueName): QueuedMessageReservation[] {
+    const first = this.messages[0];
+    return first ? [{ queue, message: first }] : [];
+  }
+
+  acknowledge(messageId: string): void {
+    if (this.messages[0]?.id !== messageId) {
+      throw new Error(`Queue reservation is no longer at the head: ${messageId}`);
+    }
+    this.messages.shift();
   }
 
   hasMessages(): boolean {
-    // 调度器用它判断是否需要下一 Turn；不能用 drainOne() 试探，否则会丢消息。
+    // 调度器用它判断是否需要下一 Turn；不能用 reserveOne() 试探，否则会丢消息。
     return this.messages.length > 0;
   }
 
   clear(): void {
     this.messages = [];
+  }
+
+  restore(messages: readonly AgentMessage[]): void {
+    this.messages = messages.slice();
   }
 
   snapshot(): AgentMessage[] {
@@ -120,6 +144,8 @@ export class Agent {
   private readonly sleep?: SleepFn;
   /** 消息 ID 来源：注入后可让测试用确定性身份，缺省用 randomUUID。 */
   private readonly idGenerator: IdGenerator;
+  /** 持久化提交入口：配置后 steer/followUp/reset 先落盘再改内存。 */
+  private readonly sessionCommitter?: SessionCommitter;
   /** 默认保持串行；只有调用者显式开启 parallel 才会尝试并行。 */
   private readonly toolExecutionMode: ToolExecutionMode;
   /** 限制完整 Tool Call 生命周期数量，而不只是 execute() Promise 数量。 */
@@ -156,6 +182,11 @@ export class Agent {
     if (!options.retryPolicy && options.sleep) {
       throw new Error("sleep requires retryPolicy");
     }
+    if (Boolean(options.initialSession) !== Boolean(options.sessionCommitter)) {
+      throw new Error(
+        "initialSession and sessionCommitter must be configured together",
+      );
+    }
     this.retryPolicy = options.retryPolicy;
     this.sleep = options.retryPolicy
       ? options.sleep ?? defaultSleep
@@ -171,16 +202,24 @@ export class Agent {
     this.prepareRequest = options.prepareRequest;
     this.transformContext = options.transformContext;
     this.idGenerator = options.idGenerator ?? randomUUID;
+    this.sessionCommitter = options.sessionCommitter;
+    // 恢复场景：消息与队列全部来自快照，不再插入新的 system 消息。
+    if (options.initialSession) {
+      this.steeringQueue.restore(options.initialSession.steeringQueue);
+      this.followUpQueue.restore(options.initialSession.followUpQueue);
+    }
+    const messages = options.initialSession
+      ? options.initialSession.messages.slice()
+      : [
+          {
+            id: this.idGenerator(),
+            role: "system" as const,
+            content: options.systemPrompt,
+            timestamp: Date.now(),
+          },
+        ];
     this.mutableState = {
-      // 消息历史以系统提示词开头
-      messages: [
-        {
-          id: this.idGenerator(),
-          role: "system",
-          content: options.systemPrompt,
-          timestamp: Date.now(),
-        },
-      ],
+      messages,
       tools: options.tools.slice(),
       isStreaming: false,
       pendingToolCalls: new Set(),
@@ -212,17 +251,22 @@ export class Agent {
   /**
    * 排队一条“插队”消息：在当前 assistant 响应及其工具完成后的
    * 下一个安全 Turn 边界投递。随时可调用（包括 run 进行中）。
+   * 配置了 sessionCommitter 时先落盘，append 失败则内存队列保持不变。
    */
-  steer(content: string): void {
-    this.steeringQueue.enqueue(this.createUserMessage(content));
+  async steer(content: string): Promise<void> {
+    const message = this.createUserMessage(content);
+    await this.sessionCommitter?.enqueue("steering", message);
+    this.steeringQueue.enqueue(message);
   }
 
   /**
    * 排队一条“追加”消息：仅当当前任务会自然停止时才被消费
    * （在内层循环退出、外层检查时才被看到）。
    */
-  followUp(content: string): void {
-    this.followUpQueue.enqueue(this.createUserMessage(content));
+  async followUp(content: string): Promise<void> {
+    const message = this.createUserMessage(content);
+    await this.sessionCommitter?.enqueue("followUp", message);
+    this.followUpQueue.enqueue(message);
   }
 
   /** 中止当前 run：信号同时传给模型流和工具；无活动 run 时是空操作 */
@@ -262,29 +306,36 @@ export class Agent {
     }
 
     if (lastMessage.role === "assistant") {
-      const steering = this.steeringQueue.drainOne();
-      if (steering.length > 0) {
-        await this.run(steering);
-        return;
+      if (
+        !this.steeringQueue.hasMessages() &&
+        !this.followUpQueue.hasMessages()
+      ) {
+        throw new Error("Cannot continue from message role: assistant");
       }
-      const followUps = this.followUpQueue.drainOne();
-      if (followUps.length > 0) {
-        await this.run(followUps);
-        return;
-      }
-      throw new Error("Cannot continue from message role: assistant");
+      await this.run([]);
+      return;
     }
 
     await this.run([]);
   }
 
-  /** 清空历史与队列，回到只剩系统提示词的初始状态（要求当前空闲） */
-  reset(): void {
+  /**
+   * 清空历史与队列，回到只剩系统提示词的初始状态（要求当前空闲）。
+   * 配置了 sessionCommitter 时先落盘 reset 记录，append 失败则内存保持不变。
+   */
+  async reset(): Promise<void> {
     this.assertIdle();
-    const system = this.mutableState.messages.find(
-      (message) => message.role === "system",
+    const existingSystem = this.mutableState.messages.find(
+      (message): message is SystemMessage => message.role === "system",
     );
-    this.mutableState.messages = system ? [system] : [];
+    const systemMessage: SystemMessage = {
+      id: this.idGenerator(),
+      role: "system",
+      content: existingSystem?.content ?? "",
+      timestamp: Date.now(),
+    };
+    await this.sessionCommitter?.reset(systemMessage);
+    this.mutableState.messages = [systemMessage];
     this.mutableState.streamingMessage = undefined;
     this.mutableState.pendingToolCalls = new Set();
     this.mutableState.errorMessage = undefined;
@@ -322,10 +373,22 @@ export class Agent {
       idGenerator: this.idGenerator,
       retryPolicy: this.retryPolicy,
       sleep: this.sleep,
-      getSteeringMessages: () => this.steeringQueue.drainOne(),
-      getFollowUpMessages: () => this.followUpQueue.drainOne(),
+      reserveSteeringMessages: () =>
+        this.steeringQueue.reserveOne("steering"),
+      reserveFollowUpMessages: () =>
+        this.followUpQueue.reserveOne("followUp"),
+      acknowledgeReservations: (reservations) => {
+        for (const reservation of reservations) {
+          const queue =
+            reservation.queue === "steering"
+              ? this.steeringQueue
+              : this.followUpQueue;
+          queue.acknowledge(reservation.message.id);
+        }
+      },
       hasSteeringMessages: () => this.steeringQueue.hasMessages(),
       hasFollowUpMessages: () => this.followUpQueue.hasMessages(),
+      sessionCommitter: this.sessionCommitter,
       toolExecutionMode: this.toolExecutionMode,
       maxToolConcurrency: this.maxToolConcurrency,
       beforeToolCall: this.beforeToolCall,

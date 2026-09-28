@@ -5,7 +5,14 @@ import {
   openOrCreateSession,
 } from "../src/session-committer.ts";
 import { MemorySessionStore } from "../src/session-store.ts";
-import { systemMessage, userMessage } from "./helpers.ts";
+import type { AgentEvent } from "../src/types.ts";
+import type { SessionSnapshot } from "../src/session.ts";
+import {
+  assistantMessage,
+  systemMessage,
+  toolResultMessage,
+  userMessage,
+} from "./helpers.ts";
 
 test("openOrCreate creates header and initial system message once", async () => {
   const store = new MemorySessionStore();
@@ -131,4 +138,178 @@ test("openOrCreate heals a header-only session left by interrupted creation", as
     ["system-1"],
   );
   assert.equal(reopened.snapshot.lastSequence, 1);
+});
+
+import { Agent } from "../src/agent.ts";
+import { createMockStream } from "../src/mock-llm.ts";
+
+test("restored Agent uses snapshot messages and queues without a duplicate system message", async () => {
+  const store = new MemorySessionStore();
+  const opened = await openOrCreateSession({
+    store,
+    sessionId: "restored",
+    systemMessage: systemMessage(),
+  });
+  await opened.committer.commitMessages({
+    messages: [userMessage("restored-user", "hello")],
+  });
+  await opened.committer.enqueue(
+    "followUp",
+    userMessage("restored-follow-up", "later"),
+  );
+  const snapshot = await store.load("restored");
+  const agent = new Agent({
+    systemPrompt: "must not be inserted",
+    stream: createMockStream({ idGenerator: () => "assistant-restored" }),
+    tools: [],
+    initialSession: snapshot,
+    sessionCommitter: opened.committer,
+    idGenerator: (() => {
+      let index = 0;
+      return () => `agent-id-${++index}`;
+    })(),
+  });
+
+  assert.deepEqual(agent.state.messages.map((message) => message.id), [
+    "system-1",
+    "restored-user",
+  ]);
+  assert.equal(
+    agent.queuedMessages.followUp[0]?.id,
+    "restored-follow-up",
+  );
+});
+
+test("durable enqueue becomes visible only after append succeeds", async () => {
+  const store = new MemorySessionStore();
+  const opened = await openOrCreateSession({
+    store,
+    sessionId: "enqueue-failure",
+    systemMessage: systemMessage(),
+  });
+  const agent = new Agent({
+    systemPrompt: "unused",
+    stream: createMockStream(),
+    tools: [],
+    initialSession: opened.snapshot,
+    sessionCommitter: opened.committer,
+    idGenerator: () => "queued-fixed",
+  });
+
+  store.failNextAppend(new Error("disk full"));
+  await assert.rejects(agent.steer("queued"), /disk full/);
+  assert.deepEqual(
+    agent.queuedMessages.steering.map((message) => message.id),
+    [],
+  );
+  await agent.steer("queued");
+  assert.equal(agent.queuedMessages.steering[0]?.id, "queued-fixed");
+});
+
+test("durable reset leaves memory unchanged on append failure", async () => {
+  const store = new MemorySessionStore();
+  const opened = await openOrCreateSession({
+    store,
+    sessionId: "reset-failure",
+    systemMessage: systemMessage(),
+  });
+  const agent = new Agent({
+    systemPrompt: "unused",
+    stream: createMockStream(),
+    tools: [],
+    initialSession: opened.snapshot,
+    sessionCommitter: opened.committer,
+    idGenerator: () => "new-system",
+  });
+  store.failNextAppend(new Error("disk full"));
+  await assert.rejects(agent.reset(), /disk full/);
+  assert.equal(agent.state.messages[0]?.id, "system-1");
+});
+
+test("Agent rejects half-configured persistence", () => {
+  assert.throws(
+    () =>
+      new Agent({
+        systemPrompt: "test",
+        stream: createMockStream(),
+        tools: [],
+        initialSession: {
+          metadata: {
+            id: "x",
+            createdAt: "",
+            updatedAt: "",
+          },
+          messages: [],
+          steeringQueue: [],
+          followUpQueue: [],
+          pendingEffects: [],
+          cancelledEffects: [],
+          recoveryWarnings: [],
+          loadDiagnostics: [],
+          lastSequence: 0,
+        },
+      }),
+    /initialSession and sessionCommitter must be configured together/,
+  );
+});
+
+test("continue applies the same tail rules after recovery", async () => {
+  const createRestored = (messages: SessionSnapshot["messages"]) =>
+    new Agent({
+      systemPrompt: "unused",
+      stream: createMockStream({
+        idGenerator: () => "continued-assistant",
+      }),
+      tools: [],
+      initialSession: {
+        metadata: {
+          id: "continue",
+          createdAt: "",
+          updatedAt: "",
+        },
+        messages,
+        steeringQueue: [],
+        followUpQueue: [],
+        pendingEffects: [],
+        cancelledEffects: [],
+        recoveryWarnings: [],
+        loadDiagnostics: [],
+        lastSequence: 0,
+      },
+      sessionCommitter: {
+        commitMessages: async () => {},
+        enqueue: async () => {},
+        startEffect: async () => {},
+        finishEffect: async () => {},
+        cancelEffect: async () => {},
+        reset: async () => {},
+      },
+      idGenerator: () => "continued-user",
+    });
+
+  const userTail = createRestored([
+    systemMessage(),
+    userMessage("pending-user", "pending"),
+  ]);
+  await userTail.continue();
+  assert.equal(userTail.state.messages.at(-1)?.role, "assistant");
+
+  const toolTail = createRestored([
+    systemMessage(),
+    toolResultMessage("pending-tool-result"),
+  ]);
+  await toolTail.continue();
+  assert.equal(toolTail.state.messages.at(-1)?.role, "assistant");
+
+  const assistantTail = createRestored([
+    systemMessage(),
+    assistantMessage("answered-assistant"),
+  ]);
+  await assert.rejects(
+    assistantTail.continue(),
+    /Cannot continue from message role: assistant/,
+  );
+
+  const empty = createRestored([systemMessage()]);
+  await assert.rejects(empty.continue(), /No messages to continue from/);
 });
