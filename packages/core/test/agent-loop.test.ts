@@ -5,7 +5,12 @@ import { ModelError } from "../src/errors.ts";
 import { createMockStream } from "../src/mock-llm.ts";
 import { createDefaultRetryPolicy } from "../src/retry.ts";
 import { createReadTool } from "../src/tools.ts";
-import { createIdGenerator } from "./helpers.ts";
+import {
+  assistantMessage,
+  createIdGenerator,
+  systemMessage,
+  userMessage,
+} from "./helpers.ts";
 import type {
   AgentEvent,
   AgentMessage,
@@ -862,4 +867,64 @@ test("tool failures stay Tool Results and never call model retry policy", async 
   assert.equal(toolResult.isError, true);
   assert.equal(toolResult.content, "tool exploded");
   assert.equal(decisions, 0);
+});
+
+test("first Turn falls back to follow-up reservation when prompts are empty and no steering is queued", async () => {
+  const context = {
+    messages: [
+      systemMessage(),
+      userMessage("user-1", "hello"),
+      assistantMessage("assistant-1", "done"),
+    ] as AgentMessage[],
+    tools: [],
+  };
+  const followUps: AgentMessage[] = [userMessage("user-later", "later")];
+  let streamCalls = 0;
+  const stream: StreamFn = async function* () {
+    streamCalls += 1;
+    const message: AssistantMessage = {
+      id: `assistant-next-${streamCalls}`,
+      role: "assistant",
+      content: [{ type: "text", text: `next-${streamCalls}` }],
+      stopReason: "stop",
+      timestamp: 10,
+    };
+    yield { type: "start", message };
+    yield { type: "end", message };
+  };
+
+  await runAgentLoop(
+    [],
+    context,
+    {
+      ...baseLoopConfig(stream),
+      reserveFollowUpMessages: () =>
+        followUps.length > 0
+          ? [{ queue: "followUp" as const, message: followUps[0]! }]
+          : [],
+      acknowledgeReservations: (reservations) => {
+        for (const reservation of reservations) {
+          const index = followUps.indexOf(reservation.message);
+          if (index >= 0) followUps.splice(index, 1);
+        }
+      },
+      hasFollowUpMessages: () => followUps.length > 0,
+    },
+    async () => {},
+    new AbortController().signal,
+  );
+
+  // Without the fallback the loop would invoke the model once against its own
+  // answer (assistant-assistant adjacency) before delivering the follow-up.
+  assert.equal(streamCalls, 1);
+  assert.deepEqual(
+    context.messages.map((message) => `${message.role}:${message.id}`),
+    [
+      "system:system-1",
+      "user:user-1",
+      "assistant:assistant-1",
+      "user:user-later",
+      "assistant:assistant-next-1",
+    ],
+  );
 });

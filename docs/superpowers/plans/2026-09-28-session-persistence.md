@@ -2041,6 +2041,8 @@ test("failed queue dequeue commit keeps the reservation in memory", async () => 
 });
 ```
 
+**Amendment (test arming, applied during implementation):** as the task brief anticipated, `failNextAppend` armed after `steer()` actually fails the PROMPT commit (the loop commits prompts before it reserves/consumes the queue), and arming inside the stream never fires (queue delivery happens before the model is called). The implemented test instead arms `failNextAppend` from a subscriber on the prompt's `message_end` — the last observable point before the steering dequeue commit — so the prompt commit succeeds and the dequeue commit genuinely fails while the reservation stays in memory. The test additionally asserts `agent.state.errorMessage === "disk full"`.
+
 - [ ] **Step 2: Run focused tests to verify current ordering fails**
 
 Run:
@@ -2117,6 +2119,8 @@ await commitMessages(
 );
 pendingReservations = [];
 ```
+
+**Amendment (plan-defect fix from the Task 5 quality review, mandated for this task):** without a fallback, `continue()` from an assistant tail with ONLY a follow-up queued runs a spurious model turn against the assistant's own answer before the follow-up is delivered (transcript `system, user, assistant, assistant, user(later), assistant`) — and now that assistant messages are durable, that spurious assistant message gets committed. Fix: the first-turn reservation falls back to `reserveFollowUpMessages()` when `prompts.length === 0` and no steering is queued. `prompt()` always passes ≥1 message, so "follow-up waits for natural stop" semantics is preserved for prompt-initiated runs; `continue()` from a user/toolResult tail with an empty queue is unaffected (the fallback only fires when a follow-up is actually queued). Covered by the agent-loop test "first Turn falls back to follow-up reservation when prompts are empty and no steering is queued", which asserts transcript `system, user, assistant` + queued followUp "later" → run → `system, user, assistant, user(later), assistant` with exactly ONE new assistant message (no assistant-assistant adjacency, one model invocation).
 
 - [ ] **Step 5: Commit Assistant only on `end`**
 

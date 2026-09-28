@@ -313,3 +313,131 @@ test("continue applies the same tail rules after recovery", async () => {
   const empty = createRestored([systemMessage()]);
   await assert.rejects(empty.continue(), /No messages to continue from/);
 });
+
+test("failed prompt commit emits no user message events and stores no user message", async () => {
+  const store = new MemorySessionStore();
+  const opened = await openOrCreateSession({
+    store,
+    sessionId: "prompt-failure",
+    systemMessage: systemMessage(),
+  });
+  const events: AgentEvent[] = [];
+  const agent = new Agent({
+    systemPrompt: "unused",
+    stream: createMockStream(),
+    tools: [],
+    initialSession: opened.snapshot,
+    sessionCommitter: opened.committer,
+    idGenerator: (() => {
+      let index = 0;
+      return () => `generated-${++index}`;
+    })(),
+  });
+  agent.subscribe((event) => {
+    events.push(event);
+  });
+  store.failNextAppend(new Error("disk full"));
+
+  await agent.prompt("not committed");
+
+  assert.equal(
+    agent.state.messages.some(
+      (message) =>
+        message.role === "user" && message.content === "not committed",
+    ),
+    false,
+  );
+  assert.equal(
+    events.some(
+      (event) =>
+        (event.type === "message_start" ||
+          event.type === "message_end") &&
+        event.message.role === "user" &&
+        event.message.content === "not committed",
+    ),
+    false,
+  );
+  assert.equal(agent.state.errorMessage, "disk full");
+});
+
+test("failed Assistant commit emits no message_end and stores no Assistant", async () => {
+  const store = new MemorySessionStore();
+  const opened = await openOrCreateSession({
+    store,
+    sessionId: "assistant-failure",
+    systemMessage: systemMessage(),
+  });
+  const events: AgentEvent[] = [];
+  const agent = new Agent({
+    systemPrompt: "unused",
+    stream: async function* () {
+      const message = assistantMessage("assistant-streamed");
+      yield { type: "start", message: { ...message, content: [] } };
+      store.failNextAppend(new Error("disk full"));
+      yield { type: "end", message };
+    },
+    tools: [],
+    initialSession: opened.snapshot,
+    sessionCommitter: opened.committer,
+    idGenerator: () => "user-prompt",
+  });
+  agent.subscribe((event) => {
+    events.push(event);
+  });
+
+  await agent.prompt("hello");
+
+  assert.equal(
+    agent.state.messages.some(
+      (message) => message.id === "assistant-streamed",
+    ),
+    false,
+  );
+  assert.equal(
+    events.some(
+      (event) =>
+        event.type === "message_end" &&
+        event.message.id === "assistant-streamed",
+    ),
+    false,
+  );
+  assert.equal(agent.state.errorMessage, "disk full");
+});
+
+test("failed queue dequeue commit keeps the reservation in memory", async () => {
+  const store = new MemorySessionStore();
+  const opened = await openOrCreateSession({
+    store,
+    sessionId: "reservation-failure",
+    systemMessage: systemMessage(),
+  });
+  const agent = new Agent({
+    systemPrompt: "unused",
+    stream: createMockStream(),
+    tools: [],
+    initialSession: opened.snapshot,
+    sessionCommitter: opened.committer,
+    idGenerator: (() => {
+      let index = 0;
+      return () => `reservation-${++index}`;
+    })(),
+  });
+  // Arming point adjusted from the plan sketch: the loop commits queued
+  // messages BEFORE it ever calls the model, so arming after steer() would
+  // fail the prompt commit instead of the dequeue commit, and arming inside
+  // the stream would never fire. The prompt's message_end is the last
+  // observable point before the steering dequeue commit runs.
+  agent.subscribe((event) => {
+    if (
+      event.type === "message_end" &&
+      event.message.role === "user" &&
+      event.message.content === "prompt"
+    ) {
+      store.failNextAppend(new Error("disk full"));
+    }
+  });
+  await agent.steer("keep me");
+  await agent.prompt("prompt");
+  assert.equal(agent.queuedMessages.steering[0]?.content, "keep me");
+  assert.equal(agent.state.errorMessage, "disk full");
+});

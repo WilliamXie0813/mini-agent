@@ -341,8 +341,8 @@ export type FinishTurn = (
 
 /**
  * 循环配置：stream 是模型入口，reserve/acknowledge 方法让循环在 Turn 边界
- * 预留并确认排队消息（存储与投递策略分离），sessionCommitter 仅随配置透传，
- * 三个钩子按生命周期挂载。
+ * 预留并确认排队消息（存储与投递策略分离；确认发生在持久化提交成功之后），
+ * sessionCommitter 在消息定稿前落盘，三个钩子按生命周期挂载。
  */
 export interface AgentLoopConfig {
   stream: StreamFn;
@@ -356,7 +356,7 @@ export interface AgentLoopConfig {
   ): void;
   hasSteeringMessages(): boolean;
   hasFollowUpMessages(): boolean;
-  /** 持久化入口（可选）：Loop 层暂不直接调用，仅随配置透传。 */
+  /** 持久化入口（可选）：Loop 在每条消息定稿前先调用它完成落盘。 */
   sessionCommitter?: SessionCommitter;
   /** Agent 已填充默认值，Loop 和执行器不再自行推断。 */
   toolExecutionMode: ToolExecutionMode;

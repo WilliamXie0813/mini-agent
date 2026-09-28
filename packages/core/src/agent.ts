@@ -467,6 +467,10 @@ export class Agent {
    * 把一次 run 级失败翻译成正常的事件序列（message_start → message_end →
    * turn_end → agent_end），消息带 stopReason: "aborted" | "error"。
    * 这样订阅者不需要单独处理“循环炸了”的特殊通道。
+   *
+   * 终态消息先尝试落盘；落盘失败时不能再走同一条事件通道重试——
+   * 否则失败处理会递归产生另一条同样无法落盘的终态消息。此时只同步
+   * errorMessage 并发出 agent_end，让 run 干净收尾。
    */
   private async emitFailure(
     error: unknown,
@@ -480,6 +484,16 @@ export class Agent {
       errorMessage: error instanceof Error ? error.message : String(error),
       timestamp: Date.now(),
     };
+    try {
+      await this.sessionCommitter?.commitMessages({ messages: [message] });
+    } catch {
+      this.mutableState.errorMessage = message.errorMessage;
+      await this.processEvent(
+        { type: "agent_end", messages: this.mutableState.messages.slice() },
+        signal,
+      );
+      return;
+    }
     await this.processEvent({ type: "message_start", message }, signal);
     await this.processEvent({ type: "message_end", message }, signal);
     await this.processEvent(

@@ -53,31 +53,52 @@ function cloneAssistant(message: AssistantMessage): AssistantMessage {
   };
 }
 
-/** 非流式消息（用户消息、工具结果）的定稿仪式：成对发出 message_start / message_end */
-async function emitMessage(message: AgentMessage, emit: EventSink): Promise<void> {
-  await emit({ type: "message_start", message });
-  await emit({ type: "message_end", message });
+/**
+ * 非流式消息（用户消息、工具结果）的持久化优先定稿仪式：
+ * 先落盘并确认队列预留，再成对发出 message_start / message_end 并写回历史。
+ * 落盘失败时消息既不进历史也不发事件，调用方（runAgentLoop 或 Agent）
+ * 会把异常翻译成终态失败消息。
+ */
+async function commitMessages(
+  messages: readonly AgentMessage[],
+  reservations: readonly QueuedMessageReservation[],
+  context: AgentContext,
+  config: AgentLoopConfig,
+  emit: EventSink,
+): Promise<void> {
+  await config.sessionCommitter?.commitMessages({
+    messages,
+    dequeued: reservations,
+  });
+  config.acknowledgeReservations(reservations);
+  for (const message of messages) {
+    await emit({ type: "message_start", message });
+    await emit({ type: "message_end", message });
+    context.messages.push(message);
+  }
 }
 
 /**
- * 预留并立即确认队列消息：保持与旧 drain 语义一致的顺序——
- * 消息在 Turn 开始前出队，随后作为本 Turn 的输入被 emit 进历史。
- * （持久化提交的时机由上层在 Task 6 调整，这里只保证队列一致性。）
+ * Assistant 终稿：end 事件到达时才算定稿——先落盘，再发 message_end 并写回历史。
+ * start / text_delta / tool_call 仍即时转发（流式观感不变），但都不进历史。
  */
-function takeReservedMessages(
+async function commitAssistant(
+  message: AssistantMessage,
+  context: AgentContext,
   config: AgentLoopConfig,
-  reservations: QueuedMessageReservation[],
-): AgentMessage[] {
-  config.acknowledgeReservations(reservations);
-  return reservations.map((reservation) => reservation.message);
+  emit: EventSink,
+): Promise<void> {
+  await config.sessionCommitter?.commitMessages({ messages: [message] });
+  await emit({ type: "message_end", message });
+  context.messages.push(message);
 }
 
 /**
  * 调用模型并把模型事件流转译成 Agent 事件流：
  *   model start      → message_start
  *   text_delta/tool_call → message_update
- *   end              → message_end
- * 流结束后把最终 assistant 消息 push 进历史并返回。
+ *   end              → 定稿（commitAssistant：落盘 → message_end → 进历史）
+ * 流结束后返回最终 assistant 消息（不在此处二次 push）。
  */
 async function streamAssistantResponse(
   context: AgentContext,
@@ -113,7 +134,12 @@ async function streamAssistantResponse(
 
   let receivedEnd = false;
   for await (const modelEvent of stream) {
-    if (modelEvent.type === "end") receivedEnd = true;
+    if (modelEvent.type === "end") {
+      receivedEnd = true;
+      finalMessage = modelEvent.message;
+      await commitAssistant(modelEvent.message, context, config, emit);
+      continue;
+    }
     finalMessage = modelEvent.message;
 
     if (modelEvent.type === "start") {
@@ -135,15 +161,12 @@ async function streamAssistantResponse(
       });
       continue;
     }
-
-    await emit({ type: "message_end", message: modelEvent.message });
   }
 
-  if (!receivedEnd || !finalMessage) {
+  if (!finalMessage || !receivedEnd) {
     throw new Error("Model stream ended before end event");
   }
 
-  context.messages.push(finalMessage);
   return finalMessage;
 }
 
@@ -166,19 +189,26 @@ export async function runAgentLoop(
   await emit({ type: "agent_start" });
   await emit({ type: "turn_start" });
 
-  for (const prompt of prompts) {
-    await emitMessage(prompt, emit);
-    context.messages.push(prompt);
-  }
+  // 初始 prompt 先落盘再发出；落盘失败则整个 run 直接走失败通道。
+  await commitMessages(prompts, [], context, config, emit);
 
   let completedTurn: CompletedTurn | undefined;
   let firstTurn = true;
   let toolResultsPending = false;
-  // Run 启动前已排队的 steering 与初始 prompt 一起进入首 Turn。
-  let pendingMessages = takeReservedMessages(
-    config,
-    config.reserveSteeringMessages(),
-  );
+  // Run 启动前已排队的 steering 与初始 prompt 一起进入首 Turn（只预留不出队）。
+  let pendingReservations: QueuedMessageReservation[] =
+    config.reserveSteeringMessages();
+  // continue() 从 assistant 尾部续跑时 prompts 为空：没有 steering 就回落到
+  // followUp，避免模型对着自己的答案空转出一个 spurious Turn。
+  // prompt() 永远带 ≥1 条消息，因此 prompt 触发的 run 仍保持
+  // “followUp 等任务自然停止后才投递”的语义。
+  if (
+    prompts.length === 0 &&
+    pendingReservations.length === 0 &&
+    config.hasFollowUpMessages()
+  ) {
+    pendingReservations = config.reserveFollowUpMessages();
+  }
 
   while (true) {
     if (!firstTurn) {
@@ -192,26 +222,26 @@ export async function runAgentLoop(
         await config.prepareNextTurn?.(completedTurn, signal),
       );
       // Hook 可能耗时；返回后再检查队列，期间到达的 steering 不会错过本 Turn。
-      pendingMessages = [];
+      pendingReservations = [];
       if (config.hasSteeringMessages()) {
-        pendingMessages = takeReservedMessages(
-          config,
-          config.reserveSteeringMessages(),
-        );
+        pendingReservations = config.reserveSteeringMessages();
       } else if (!toolResultsPending && config.hasFollowUpMessages()) {
-        pendingMessages = takeReservedMessages(
-          config,
-          config.reserveFollowUpMessages(),
-        );
+        pendingReservations = config.reserveFollowUpMessages();
       }
     }
     firstTurn = false;
 
-    for (const message of pendingMessages) {
-      await emitMessage(message, emit);
-      context.messages.push(message);
+    if (pendingReservations.length > 0) {
+      // 落盘成功才确认出队、发事件、进历史；失败时预留留在队列里。
+      await commitMessages(
+        pendingReservations.map((item) => item.message),
+        pendingReservations,
+        context,
+        config,
+        emit,
+      );
+      pendingReservations = [];
     }
-    pendingMessages = [];
 
     const assistant = await streamAssistantResponse(
       context,
@@ -236,9 +266,10 @@ export async function runAgentLoop(
     });
     const toolResults: ToolResultMessage[] = batch.messages;
     // Tool Result 作为一个连续提交区间写入历史，队列消息只能在 Turn 边界进入。
+    // 每条先落盘再发出；落盘成功后才终结对应的 effect 记录。
     for (const message of toolResults) {
-      await emitMessage(message, emit);
-      context.messages.push(message);
+      await commitMessages([message], [], context, config, emit);
+      await config.sessionCommitter?.finishEffect(message.toolCallId);
     }
 
     completedTurn = {
