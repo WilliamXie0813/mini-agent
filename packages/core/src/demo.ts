@@ -55,6 +55,11 @@ agent.subscribe((event) => {
         `\n[tool:end] ${event.toolName} error=${String(event.isError)}`,
       );
       break;
+    case "tool_execution_cancelled":
+      console.log(
+        `\n[tool:cancelled] ${event.toolName} reason=${event.reason}`,
+      );
+      break;
   }
 });
 

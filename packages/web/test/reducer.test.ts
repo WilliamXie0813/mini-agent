@@ -30,19 +30,33 @@ describe("reduceEvent", () => {
     expect(state.streamingMessage).toBeUndefined();
   });
 
-  it("tracks pending tool calls", () => {
+  it("tracks out-of-order completed and cancelled tool calls", () => {
     let state = emptyState();
     state = reduceEvent(state, {
       type: "tool_execution_start",
-      toolCallId: "call-1",
+      toolCallId: "call-a",
       toolName: "read",
-      argumentsValue: { path: "package.json" },
+      argumentsValue: { path: "a" },
     });
-    expect(state.pendingToolCalls).toEqual(["call-1"]);
+    state = reduceEvent(state, {
+      type: "tool_execution_start",
+      toolCallId: "call-b",
+      toolName: "read",
+      argumentsValue: { path: "b" },
+    });
+    expect(state.pendingToolCalls).toEqual(["call-a", "call-b"]);
+
+    state = reduceEvent(state, {
+      type: "tool_execution_cancelled",
+      toolCallId: "call-b",
+      toolName: "read",
+      reason: "aborted",
+    });
+    expect(state.pendingToolCalls).toEqual(["call-a"]);
 
     state = reduceEvent(state, {
       type: "tool_execution_end",
-      toolCallId: "call-1",
+      toolCallId: "call-a",
       toolName: "read",
       result: { content: "{}" },
       isError: false,

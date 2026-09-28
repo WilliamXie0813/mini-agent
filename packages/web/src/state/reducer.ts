@@ -43,6 +43,7 @@ export function reduceEvent(
         pendingToolCalls: [...state.pendingToolCalls, event.toolCallId],
       };
     case "tool_execution_end":
+    case "tool_execution_cancelled":
       return {
         ...state,
         pendingToolCalls: state.pendingToolCalls.filter(

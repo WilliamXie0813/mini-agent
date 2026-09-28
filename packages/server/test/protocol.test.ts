@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { AgentState } from "@mini-agent/core";
-import { parseCommand, serializeState } from "../src/protocol.ts";
+import { encodeMessage, parseCommand, serializeState } from "../src/protocol.ts";
 
 function fakeState(overrides: Partial<AgentState> = {}): AgentState {
   return {
@@ -23,6 +23,28 @@ test("serializeState converts pendingToolCalls Set to an array", () => {
   assert.deepEqual(serialized.queues, { steering: [], followUp: [] });
   // 结果必须可 JSON 序列化且可还原
   assert.deepEqual(JSON.parse(JSON.stringify(serialized)), serialized);
+});
+
+test("encodeMessage preserves tool_execution_cancelled events", () => {
+  const encoded = encodeMessage({
+    type: "event",
+    event: {
+      type: "tool_execution_cancelled",
+      toolCallId: "call-2",
+      toolName: "read",
+      reason: "control_error",
+    },
+  });
+
+  assert.deepEqual(JSON.parse(encoded), {
+    type: "event",
+    event: {
+      type: "tool_execution_cancelled",
+      toolCallId: "call-2",
+      toolName: "read",
+      reason: "control_error",
+    },
+  });
 });
 
 test("parseCommand accepts valid commands", () => {
