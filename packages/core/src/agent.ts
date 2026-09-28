@@ -15,6 +15,8 @@
  * 3. 把循环抛出的异常翻译成一条 error/aborted 的 assistant 消息，让失败也走正常事件通道。
  */
 import { runAgentLoop } from "./agent-loop.ts";
+import { defaultSleep } from "./retry.ts";
+import type { RetryPolicy, SleepFn } from "./retry.ts";
 import type {
   AfterToolCall,
   AgentContext,
@@ -46,6 +48,8 @@ export interface AgentOptions {
   prepareNextTurn?: PrepareNextTurn;
   prepareRequest?: PrepareRequest;
   transformContext?: TransformContext;
+  retryPolicy?: RetryPolicy;
+  sleep?: SleepFn;
 }
 
 function normalizeMaxToolConcurrency(value: number | undefined): number {
@@ -109,6 +113,8 @@ export class Agent {
   private readonly followUpQueue = new MessageQueue();
   /** 模型入口：循环用它把 messages 换成一段 assistant 响应流 */
   private readonly stream: StreamFn;
+  private readonly retryPolicy?: RetryPolicy;
+  private readonly sleep?: SleepFn;
   /** 默认保持串行；只有调用者显式开启 parallel 才会尝试并行。 */
   private readonly toolExecutionMode: ToolExecutionMode;
   /** 限制完整 Tool Call 生命周期数量，而不只是 execute() Promise 数量。 */
@@ -142,6 +148,13 @@ export class Agent {
 
   constructor(options: AgentOptions) {
     this.stream = options.stream;
+    if (!options.retryPolicy && options.sleep) {
+      throw new Error("sleep requires retryPolicy");
+    }
+    this.retryPolicy = options.retryPolicy;
+    this.sleep = options.retryPolicy
+      ? options.sleep ?? defaultSleep
+      : undefined;
     this.toolExecutionMode = options.toolExecutionMode ?? "sequential";
     this.maxToolConcurrency = normalizeMaxToolConcurrency(
       options.maxToolConcurrency,
@@ -299,6 +312,8 @@ export class Agent {
   private createConfig(): AgentLoopConfig {
     return {
       stream: this.stream,
+      retryPolicy: this.retryPolicy,
+      sleep: this.sleep,
       getSteeringMessages: () => this.steeringQueue.drainOne(),
       getFollowUpMessages: () => this.followUpQueue.drainOne(),
       hasSteeringMessages: () => this.steeringQueue.hasMessages(),

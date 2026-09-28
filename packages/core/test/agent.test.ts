@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Agent } from "../src/agent.ts";
+import { ModelError } from "../src/errors.ts";
 import { createMockStream } from "../src/mock-llm.ts";
+import { createDefaultRetryPolicy } from "../src/retry.ts";
 import { createReadTool } from "../src/tools.ts";
 import type {
   AgentEvent,
@@ -526,3 +528,141 @@ test("model failure becomes an error Assistant message", async () => {
     if (final?.role !== "assistant") return;
     assert.equal(final.stopReason, "error");
   });
+
+test("Agent rejects sleep without retryPolicy", () => {
+  assert.throws(
+    () =>
+      createAgentWithExecutionOptions({
+        sleep: async () => {},
+      }),
+    /sleep requires retryPolicy/,
+  );
+});
+
+test("Agent accepts retryPolicy without a custom sleep", () => {
+  assert.doesNotThrow(() =>
+    createAgentWithExecutionOptions({
+      retryPolicy: createDefaultRetryPolicy(),
+    }),
+  );
+});
+
+test("Agent retries a pre-event failure without duplicate Assistant messages", async () => {
+  let attempts = 0;
+  const events: AgentEvent[] = [];
+  const agent = new Agent({
+    systemPrompt: "test",
+    tools: [],
+    retryPolicy: createDefaultRetryPolicy({ random: () => 0.5 }),
+    sleep: async () => {},
+    stream: async function* () {
+      attempts += 1;
+      if (attempts === 1) {
+        throw new ModelError("network", "offline");
+      }
+      const message: AssistantMessage = {
+        role: "assistant",
+        content: [{ type: "text", text: "recovered" }],
+        stopReason: "stop",
+        timestamp: 2,
+      };
+      yield { type: "start", message: { ...message, content: [] } };
+      yield { type: "end", message };
+    },
+  });
+  agent.subscribe((event) => {
+    events.push(event);
+  });
+
+  await agent.prompt("hello");
+
+  assert.equal(attempts, 2);
+  assert.equal(
+    agent.state.messages.filter((message) => message.role === "assistant")
+      .length,
+    1,
+  );
+  assert.deepEqual(
+    events
+      .filter((event) => event.type.startsWith("model_retry_"))
+      .map((event) => event.type),
+    ["model_retry_scheduled", "model_retry_started"],
+  );
+});
+
+test("Agent turns non-retryable model errors into one error message", async () => {
+  let attempts = 0;
+  const agent = new Agent({
+    systemPrompt: "test",
+    tools: [],
+    retryPolicy: createDefaultRetryPolicy(),
+    stream: async function* () {
+      attempts += 1;
+      throw new ModelError("authentication", "invalid token");
+    },
+  });
+
+  await agent.prompt("hello");
+
+  assert.equal(attempts, 1);
+  const final = agent.state.messages.at(-1);
+  assert.equal(final?.role, "assistant");
+  if (final?.role !== "assistant") return;
+  assert.equal(final.stopReason, "error");
+  assert.equal(final.errorMessage, "invalid token");
+});
+
+test("Agent aborts during retry sleep without starting another attempt", async () => {
+  let attempts = 0;
+  let agent!: Agent;
+  agent = new Agent({
+    systemPrompt: "test",
+    tools: [],
+    retryPolicy: createDefaultRetryPolicy({ random: () => 0.5 }),
+    stream: async function* () {
+      attempts += 1;
+      throw new ModelError("network", "offline");
+    },
+  });
+  agent.subscribe((event) => {
+    if (event.type === "model_retry_scheduled") agent.abort();
+  });
+
+  await agent.prompt("hello");
+
+  assert.equal(attempts, 1);
+  const final = agent.state.messages.at(-1);
+  assert.equal(final?.role, "assistant");
+  if (final?.role !== "assistant") return;
+  assert.equal(final.stopReason, "aborted");
+});
+
+test("Agent converts an incomplete non-retried stream into an error message", async () => {
+  const agent = new Agent({
+    systemPrompt: "test",
+    tools: [],
+    stream: async function* () {
+      yield {
+        type: "start",
+        message: {
+          role: "assistant",
+          content: [],
+          stopReason: "stop",
+          timestamp: 2,
+        },
+      };
+    },
+  });
+
+  await agent.prompt("hello");
+
+  const assistants = agent.state.messages.filter(
+    (message) => message.role === "assistant",
+  );
+  assert.equal(assistants.length, 1);
+  assert.equal(assistants[0]?.stopReason, "error");
+  assert.equal(
+    assistants[0]?.errorMessage,
+    "Model stream ended before end event",
+  );
+});
