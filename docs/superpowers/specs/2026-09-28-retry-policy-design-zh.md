@@ -335,7 +335,7 @@ network error after 3 attempts: connection reset
 
 ### 策略单元测试（确定性）
 
-1. 默认参数下退避序列约为 250 / 500 / 1000（注入 `random: () => 0.5` 使 jitter 恒为 1，断言精确值）。
+1. 默认参数（`maxAttempts: 3`）下实际退避为 250 / 500；配置 `maxAttempts: 4` 时序列为 250 / 500 / 1000（注入 `random: () => 0.5` 使 jitter 恒为 1，断言精确值）。
 2. `retryable: false` 的错误一律拒绝。
 3. `attempt + 1 > maxAttempts` 拒绝。
 4. `retryAfterMs` 覆盖指数退避，但不超过 `maxDelayMs`。
