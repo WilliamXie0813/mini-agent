@@ -2138,6 +2138,8 @@ if (!finalMessage || !receivedEnd) {
 }
 ```
 
+Note: streaming Assistant updates (`message_start` / `message_update`) are transient — their message ids may never finalize if the run fails mid-stream; only a committed `message_end` implies durability.
+
 - [ ] **Step 6: Persist Tool Results before exposing them**
 
 After `executeToolCallBatch`, replace the Tool Result loop with:
@@ -2150,6 +2152,8 @@ for (const message of toolResults) {
 ```
 
 When persistence is disabled, optional chaining preserves existing runtime ordering.
+
+**Amendment (dangling toolCall transcripts):** a mid-run tool-result commit failure now durably persists a transcript of `assistant(N toolCalls) → some toolResults → failure message`; after recovery the transcript can therefore contain tool calls with no matching results, which most real providers reject on the next turn. The runtime deliberately does NOT synthesize tool results for, or filter out, dangling toolCalls — recovery surfaces them as unknown-effect warnings instead (see Task 7's replay rules). Callers who continue such recovered sessions against strict providers must project or filter the transcript themselves (e.g. via `transformContext`). A built-in dangling-toolCall projection is possible future work and is out of scope for this plan.
 
 - [ ] **Step 7: Make failure-message persistence non-recursive**
 

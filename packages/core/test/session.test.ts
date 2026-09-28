@@ -6,7 +6,7 @@ import {
 } from "../src/session-committer.ts";
 import { MemorySessionStore } from "../src/session-store.ts";
 import type { AgentEvent } from "../src/types.ts";
-import type { SessionSnapshot } from "../src/session.ts";
+import type { SessionCommitter, SessionSnapshot } from "../src/session.ts";
 import {
   assistantMessage,
   systemMessage,
@@ -439,5 +439,60 @@ test("failed queue dequeue commit keeps the reservation in memory", async () => 
   await agent.steer("keep me");
   await agent.prompt("prompt");
   assert.equal(agent.queuedMessages.steering[0]?.content, "keep me");
+  assert.equal(agent.state.errorMessage, "disk full");
+});
+
+test("double persistence failure emits no terminal message events but still settles the run", async () => {
+  const store = new MemorySessionStore();
+  const opened = await openOrCreateSession({
+    store,
+    sessionId: "double-failure",
+    systemMessage: systemMessage(),
+  });
+  // MemorySessionStore.failNextAppend arms exactly ONE failed append, and no
+  // event fires between the two failures we need: the prompt commit fails
+  // before any message event, and the terminal failure message only emits
+  // after its own commit succeeds. So wrap the committer and re-arm the store
+  // from the second commitMessages call (the emitFailure terminal commit).
+  const inner = opened.committer;
+  let commitCalls = 0;
+  const committer: SessionCommitter = {
+    ...inner,
+    commitMessages: (commit) => {
+      commitCalls += 1;
+      if (commitCalls === 2) {
+        store.failNextAppend(new Error("disk still full"));
+      }
+      return inner.commitMessages(commit);
+    },
+  };
+  const events: AgentEvent[] = [];
+  const agent = new Agent({
+    systemPrompt: "unused",
+    stream: createMockStream(),
+    tools: [],
+    initialSession: opened.snapshot,
+    sessionCommitter: committer,
+    idGenerator: () => "double-failure-user",
+  });
+  agent.subscribe((event) => {
+    events.push(event);
+  });
+  store.failNextAppend(new Error("disk full"));
+
+  await agent.prompt("not committed");
+  await agent.waitForIdle();
+
+  // The terminal failure message never emits: its persistence failed, so the
+  // non-recursive branch records only errorMessage and a bare agent_end.
+  const terminalMessageEvents = events.filter(
+    (event) =>
+      (event.type === "message_start" || event.type === "message_end") &&
+      event.message.role === "assistant",
+  );
+  assert.deepEqual(terminalMessageEvents, []);
+  assert.equal(events.some((event) => event.type === "agent_end"), true);
+  // errorMessage reports the original run failure, not the secondary
+  // persistence failure ("disk still full").
   assert.equal(agent.state.errorMessage, "disk full");
 });
