@@ -66,6 +66,12 @@ export interface Tool<TParameters> {
 }
 ```
 
+`executionMode` 采用保守默认：
+
+- `"parallel"`：明确允许并行。
+- `"sequential"`：要求整批串行。
+- `undefined`：等价于 `"sequential"`，避免旧工具在没有并发安全声明时被意外并行。
+
 增加批次执行接口：
 
 ```ts
@@ -149,10 +155,10 @@ Agent 默认 sequential
     ↓
 用户显式配置 parallel
     ↓
-检查批次中是否有工具声明 executionMode: sequential
+检查所有 ready 工具是否都显式声明 executionMode: parallel
     ↓
-有 → 整批串行
-无 → 并行
+是 → 并行
+否 → 整批串行
 ```
 
 整批降级比部分并行更容易解释，也更适合教学版。
@@ -175,7 +181,10 @@ export interface ParallelToolOptions {
 - `abort()` 后不再启动尚未开始的任务。
 - 已启动工具必须协作式响应 Signal。
 - Agent 必须等待已启动 Promise 结算，避免悬空任务继续修改外部状态。
+- Event Dispatcher 可用时，每个已发出 start 的工具最终必须发出 end 或 cancelled，确保 pending 状态可以被事件消费者清理；EventSink 自身失败时由 Run 收尾清理内部状态。
 - 中止不转换成普通错误 Tool Result，而是终止整个 Run。
+
+并行工具的 start、update、end 和 cancelled 事件必须经过串行 Dispatcher；`afterToolCall` 也串行执行，避免订阅者和已有 Hook 被并发调用。
 
 ## 调用链变化
 
@@ -227,7 +236,9 @@ Assistant toolCalls
 5. `maxConcurrency: 2` 时最多两个工具同时运行。
 6. 参数非法工具不调用 `execute()`。
 7. `beforeToolCall` 仍按模型源顺序执行。
-8. abort 后未启动任务不再启动，已启动任务被等待。
+8. 重复 Tool Call ID 在任何工具启动前被拒绝。
+9. EventSink 和 `afterToolCall` 不会并发执行。
+10. abort 后未启动任务不再启动，已启动任务被等待，并在 Event Dispatcher 可用时产生 cancelled 终止事件。
 
 ## 验收标准
 
