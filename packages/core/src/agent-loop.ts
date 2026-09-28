@@ -8,9 +8,8 @@
  * - 在 Turn 边界排空 steering 队列（插队消息），在任务自然停止后才排空 followUp 队列；
  * - 尊重 finishTurn 钩子的 end / continue 决策。
  *
- * 循环结构（对应设计文档）：
- *   外层 while —— 处理 followUp 与 finishTurn 的显式 continue；
- *   内层 while —— 处理工具调用链与 steering 消息（“还有活干就再来一个 Turn”）。
+ * 每轮循环对应一个 Turn；Turn 结束后只做非破坏性队列检查，
+ * 确认确实还有工作时才启动下一 Turn。
  */
 import type {
   AgentContext,
@@ -27,6 +26,7 @@ import type {
 } from "./types.ts";
 
 function snapshotContext(context: AgentContext): AgentContextSnapshot {
+  // 只复制容器，不深拷贝消息；消息在一次 Run 内按不可变值使用。
   return {
     messages: context.messages.slice(),
     tools: context.tools.slice(),
@@ -38,6 +38,7 @@ function applyPreparation(
   preparation: { messages?: readonly AgentMessage[] } | undefined,
 ): void {
   if (preparation?.messages) {
+    // 再复制一次，避免 Hook 返回后继续修改自己持有的数组影响 Loop。
     context.messages = preparation.messages.slice();
   }
 }
@@ -71,6 +72,7 @@ async function streamAssistantResponse(
 ): Promise<AssistantMessage> {
   let finalMessage: AssistantMessage | undefined;
   signal.throwIfAborted();
+  // prepareRequest 可以同步权威历史，因此它修改的是本 Run 的工作上下文。
   applyPreparation(
     context,
     await config.prepareRequest?.(snapshotContext(context), signal),
@@ -80,6 +82,7 @@ async function streamAssistantResponse(
     ? await config.transformContext(context.messages, signal)
     : context.messages;
   const requestMessages = transformed.slice();
+  // requestMessages 是一次性投影；后续 Assistant 仍写回 context.messages。
 
   for await (const modelEvent of config.stream(requestMessages, signal)) {
     finalMessage = modelEvent.message;
@@ -221,7 +224,7 @@ async function executeToolCall(
  *
  * @param prompts  本轮要追加的输入消息（prompt() 的用户消息，或 continue() 从队列取出的消息）
  * @param context  上下文快照（messages 会被本函数就地 push 增长）
- * @param config   模型入口、队列拉取器与三个钩子
+ * @param config   模型入口、队列 peek/drain 方法与生命周期钩子
  * @param emit     事件出口（Agent 会把它归约成状态再通知订阅者）
  * @param signal   整个 run 的中止信号，同时传给模型和工具
  */
@@ -243,6 +246,7 @@ export async function runAgentLoop(
   let completedTurn: CompletedTurn | undefined;
   let firstTurn = true;
   let toolResultsPending = false;
+  // Run 启动前已排队的 steering 与初始 prompt 一起进入首 Turn。
   let pendingMessages = config.getSteeringMessages();
 
   while (true) {
@@ -256,6 +260,7 @@ export async function runAgentLoop(
         context,
         await config.prepareNextTurn?.(completedTurn, signal),
       );
+      // Hook 可能耗时；返回后再检查队列，期间到达的 steering 不会错过本 Turn。
       pendingMessages = [];
       if (config.hasSteeringMessages()) {
         pendingMessages = config.getSteeringMessages();
@@ -300,6 +305,7 @@ export async function runAgentLoop(
     }
 
     toolResultsPending = toolResults.length > 0;
+    // 这里只“看”队列，不消费；真正 drain 发生在下一 Turn 已开始之后。
     const hasNextTurn =
       toolResultsPending ||
       config.hasSteeringMessages() ||

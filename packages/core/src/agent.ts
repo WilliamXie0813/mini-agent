@@ -32,7 +32,7 @@ import type {
   UserMessage,
 } from "./types.ts";
 
-/** 构造 Agent 所需的全部依赖：系统提示词、模型入口、工具表、三个可选钩子 */
+/** 构造 Agent 所需的全部依赖：系统提示词、模型入口、工具表和生命周期钩子 */
 export interface AgentOptions {
   systemPrompt: string;
   stream: StreamFn;
@@ -69,6 +69,7 @@ class MessageQueue {
   }
 
   hasMessages(): boolean {
+    // 调度器用它判断是否需要下一 Turn；不能用 drainOne() 试探，否则会丢消息。
     return this.messages.length > 0;
   }
 
@@ -93,7 +94,7 @@ export class Agent {
   private readonly listeners = new Set<Listener>();
   /** 插队消息队列：在下一个 Turn 边界立即消费，不等任务自然停止 */
   private readonly steeringQueue = new MessageQueue();
-  /** 追加消息队列：仅当当前任务自然停止（内层循环跑干）后才被消费 */
+  /** 追加消息队列：仅当当前任务自然停止、且没有 steering/工具结果时才消费 */
   private readonly followUpQueue = new MessageQueue();
   /** 模型入口：循环用它把 messages 换成一段 assistant 响应流 */
   private readonly stream: StreamFn;
@@ -103,8 +104,11 @@ export class Agent {
   private readonly afterToolCall?: AfterToolCall;
   /** Turn 结束后的调度钩子：决定 run 是结束、继续，还是走默认调度 */
   private readonly finishTurn?: FinishTurn;
+  /** 下一 Turn 已确定开始后，用上一 Turn 快照重建工作消息 */
   private readonly prepareNextTurn?: PrepareNextTurn;
+  /** 每次模型请求前同步本 Run 的工作上下文 */
   private readonly prepareRequest?: PrepareRequest;
+  /** 生成仅供本次模型请求使用的临时消息投影 */
   private readonly transformContext?: TransformContext;
   /** 有值表示正在跑；所有会启动 run 的入口都先用 assertIdle 检查它 */
   private activeRun?: ActiveRun;
@@ -272,7 +276,7 @@ export class Agent {
     };
   }
 
-  /** 组装循环配置：模型入口 + 队列拉取器（循环在边界处主动 drainOne）+ 三个钩子 */
+  /** 组装循环配置：模型入口、队列的 peek/drain 能力，以及全部生命周期钩子 */
   private createConfig(): AgentLoopConfig {
     return {
       stream: this.stream,

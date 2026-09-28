@@ -198,10 +198,12 @@ export interface AgentContext {
 }
 
 export interface AgentContextSnapshot {
+  /** Hook 只能读取快照；若要替换消息，必须通过 ContextPreparation 显式返回。 */
   readonly messages: readonly AgentMessage[];
   readonly tools: readonly Tool<unknown>[];
 }
 
+/** prepare Hook 的返回值；当前阶段只允许替换消息，不开放动态工具修改。 */
 export interface ContextPreparation {
   messages?: readonly AgentMessage[];
 }
@@ -211,19 +213,25 @@ export type PrepareRequest = (
   signal: AbortSignal,
 ) => Promise<ContextPreparation | undefined>;
 
+/** 最后一层请求投影：返回值只传给 StreamFn，不写回 Agent 历史。 */
 export type TransformContext = (
   messages: readonly AgentMessage[],
   signal: AbortSignal,
 ) => Promise<readonly AgentMessage[]>;
 
 export interface TokenEstimator {
+  /** 教学型近似值，只用于触发压缩和验证预算。 */
   estimate(messages: readonly AgentMessage[]): number;
 }
 
 export interface DeterministicCompactingTransformOptions {
+  /** 模型请求允许的近似 Token 上限。 */
   maxInputTokens: number;
+  /** 无论多长都原样保留的最近完整 Turn 数。 */
   preserveRecentTurns: number;
+  /** 每种角色写入确定性摘要的最大 Unicode Code Point 数。 */
   maxExcerptCharacters?: number;
+  /** 可替换估算策略；默认使用教学型启发式估算器。 */
   estimator?: TokenEstimator;
 }
 
@@ -271,6 +279,7 @@ export interface CompletedTurn {
   context: AgentContextSnapshot;
 }
 
+/** 已确认存在下一 Turn 后执行，可依据上一 Turn 的稳定快照重建工作消息。 */
 export type PrepareNextTurn = (
   turn: CompletedTurn,
   signal: AbortSignal,
