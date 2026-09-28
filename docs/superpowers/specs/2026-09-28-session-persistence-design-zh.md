@@ -20,14 +20,14 @@
 
 - `packages/core` 新增 `session.ts`（纯类型）与 `session-store.ts`（接口 + 两个实现）。
 - `SessionStore` 接口与 `JsonlSessionStore` / `MemorySessionStore` 两个可互换实现。
-- `SessionCommitter` 运行时提交接口：写盘成功是消息定稿、队列变更可见的前置条件。
+- `SessionCommitter` 运行时提交接口：一个逻辑提交序列化为一条 JSONL Commit Envelope，写盘成功是消息定稿、队列变更可见的前置条件。
 - 四种 `AgentMessage` 全部增加必填 `id` 字段 + 各构造点可注入 `IdGenerator`。
 - `PendingEffect` 副作用记录：工具执行前写 `effect_started`，结果落盘后写 `effect_finished`，被取消写 `effect_cancelled`。
 - `reset` 记录：append-only 语义下的 Session 重置。
-- 恢复语义：`AgentOptions` 接收 `sessionStore` / `sessionId`，构造时恢复或新建。
+- 恢复语义：异步 `openOrCreateSession()` 先恢复或新建，再把稳定 Snapshot 与 Committer 传给同步 `Agent` 构造函数。
 - `continue()` 尾部规则（先 drain 队列再判定，对恢复与非恢复场景统一生效）。
 - `steer()` / `followUp()` 改为异步方法（队列变更落盘成功才可见）。
-- 新事件：`session_committed`、`session_recovery_warning`。
+- 新事件 `session_recovery_warning`；诊断先作为 `SessionSnapshot.recoveryWarnings` 稳定返回，再由 Server 在客户端绑定完成后通过现有 Event 通道发送，不依赖构造期间的瞬态事件。
 - `packages/server` 新增 `SessionManager` 与 `list_sessions` / `create_session` / `open_session` 协议命令。
 - 完整的 core 单元测试（含两个 Store 实现的共享契约测试）与 server 集成测试。
 
@@ -53,9 +53,9 @@
 | 先持久化，后定稿 | `append` 成功才 emit `message_end` 并进入历史；非流式消息（User/ToolResult）commit 成功后才 emit `message_start` |
 | 流式信号是瞬态的 | 流式 Assistant 的 `message_start`/`message_update` 本来就是未定稿信号，不承诺持久；不变量只管 `message_end` 与历史 |
 | 只持久化稳定状态转换 | Session Header、完成的 Message、队列变更、工具意图与结局、reset；流式增量一律不落盘 |
-| 追加式单写 | 每条记录序列化为一整行后单次 append；尾部截断是可接受的正常崩溃形态 |
+| 追加式单写 | 每个逻辑提交序列化成一条完整 Commit Envelope 后单次 append；尾部截断时整批提交一起丢弃 |
 | 工具永不自动重放 | `effect_started` 无配对结局记录 = outcome unknown，只发诊断事件；被 abort 的写 `effect_cancelled`，单独成类 |
-| dequeue 先于 message 落盘 | 同一批 append 中 `queue_dequeued` 记录排在 `message` 记录之前；宁可丢一条已取出的队列消息，也不允许恢复后重复投递 |
+| 队列确认与消息原子恢复 | `queue_dequeued` 与对应 `message` 位于同一 Commit Envelope；恢复时要么两者都存在，要么整行截断后两者都不存在 |
 | 未配置 Store 时行为零变化 | 不传 `sessionStore` 时持久化路径不激活，**运行时行为**与现状完全一致（测试的消息字面量需补 id，属类型层连带） |
 | Store 可替换 | `MemorySessionStore` 与 `JsonlSessionStore` 通过同一组契约测试 |
 
@@ -81,15 +81,30 @@ packages/core
 ```ts
 export type QueueName = "steering" | "followUp";
 
+export interface QueuedMessageReservation {
+  queue: QueueName;
+  message: AgentMessage;
+}
+
+export interface MessageCommit {
+  messages: readonly AgentMessage[];
+  dequeued?: readonly QueuedMessageReservation[];
+}
+
 export interface SessionCommitter {
-  commitMessages(messages: readonly AgentMessage[]): Promise<void>;
+  commitMessages(commit: MessageCommit): Promise<void>;
   enqueue(queue: QueueName, message: AgentMessage): Promise<void>;
-  dequeue(queue: QueueName, messageId: string): Promise<void>;
+  startEffect(effect: PendingEffect): Promise<void>;
+  finishEffect(toolCallId: string): Promise<void>;
+  cancelEffect(toolCallId: string): Promise<void>;
+  reset(systemMessage: SystemMessage): Promise<void>;
 }
 ```
 
 - 内部维护**串行写队列**：parallel 模式下多个工具的 `effect_started` commit 来自并发任务，Committer 保证 append 逐条执行、记录顺序与提交顺序一致。
-- 队列 drain 与消息定稿是同一批 append：drain 后 Committer 把 `queue_dequeued` 与 `message` 记录合并为一次调用，`dequeued` 在前——`AgentLoopConfig` 的同步 getter 签名保持不变，dequeue 落盘由 Loop 在 drain 之后、emit 之前完成。`Agent.continue()` 启动前的 drain 走同一挂点。
+- 队列读取改为**预留但不删除**：Loop 取得 `QueuedMessageReservation` 后调用 `commitMessages({ dequeued, messages })`。只有 Commit Envelope 写入成功后，Agent 才确认并从内存 Queue 删除；失败则 Reservation 回滚，消息仍留在 Queue。
+- `AgentLoopConfig` 的队列接口因此改成 `reserveSteeringMessages()` / `reserveFollowUpMessages()` 与 `acknowledgeReservations()`，不再使用会立即改变内存状态的同步 `drainOne()`。
+- `Agent.continue()` 不再启动前先删除 Queue Message；它只验证存在可预留消息，实际提交仍走 Loop 的统一消息边界。
 
 ### 写入顺序（按消息类型）
 
@@ -126,6 +141,22 @@ export type IdGenerator = () => string; // 默认 crypto.randomUUID
 
 测试注入确定性 id（如 `id-1, id-2, ...`）；全仓测试的消息字面量统一走带确定性 id 的构造 helper。
 
+### JSON 值约束
+
+Session 文件只能保存 JSON 值：
+
+```ts
+export type JsonValue =
+  | null
+  | boolean
+  | number
+  | string
+  | JsonValue[]
+  | { [key: string]: JsonValue };
+```
+
+`PendingEffect.arguments` 必须在工具启动前通过 `toJsonValue()` 验证。循环引用、`bigint`、函数等不可序列化参数会让 Tool Call 在产生副作用前失败，不能等到 `JSON.stringify()` 时才意外抛错。
+
 ### SessionRecord（session.ts）
 
 ```ts
@@ -135,20 +166,29 @@ export interface SessionMetadata {
   updatedAt: string;
 }
 
-export type SessionRecord =
-  | { type: "session"; version: 1; metadata: SessionMetadata }
-  | { type: "message"; sequence: number; message: AgentMessage }
+export type SessionOperation =
+  | { type: "message"; message: AgentMessage }
   | { type: "queue_enqueued"; queue: QueueName; message: AgentMessage }
   | { type: "queue_dequeued"; queue: QueueName; messageId: string }
   | { type: "effect_started"; effect: PendingEffect }
   | { type: "effect_finished"; toolCallId: string }
   | { type: "effect_cancelled"; toolCallId: string }
-  | { type: "reset" };
+  | { type: "reset"; systemMessage: SystemMessage };
+
+export type SessionRecord =
+  | { type: "session"; version: 1; metadata: SessionMetadata }
+  | {
+      type: "commit";
+      sequence: number;
+      timestamp: string;
+      operations: SessionOperation[];
+    };
 ```
 
-- `sequence` 是**单调递增的提交序号**，由 Committer 维护；恢复时用它校验消息顺序、检测缺洞。
+- `sequence` 是 Commit Envelope 的**单调递增提交序号**，覆盖 Message、Queue、Effect 和 Reset 的统一顺序；恢复时校验严格递增并检测缺洞。
+- `updatedAt` 不需要重写 Header；加载时取最后一条有效 Commit 的 `timestamp`，没有 Commit 时使用 `createdAt`。
 - 配对不变量：`queue_dequeued` 引用的 `messageId` 必须先有对应 `queue_enqueued` 记录。
-- `reset` 记录：重放时**丢弃此前全部状态**，只取最后一次 `reset` 之后的记录——保持 append-only，历史可追溯。
+- `reset` Operation：Header 始终保留；重放到 Reset 时，把 Messages 重置为该 Operation 中的 `systemMessage` 并清空 Queue。未结与已取消 Effect 属于外部副作用审计状态，不能因对话 Reset 被抹掉。
 - `effect_cancelled`：工具被 abort 取消时的结局记录。取消是用户主动行为，与"崩溃导致 outcome unknown"区分开。
 
 ### PendingEffect
@@ -157,7 +197,7 @@ export type SessionRecord =
 export interface PendingEffect {
   toolCallId: string;
   toolName: string;
-  arguments: unknown;
+  arguments: JsonValue;
   replay: "safe" | "never"; // 来自阶段 3 的 Tool.replay
 }
 ```
@@ -171,6 +211,12 @@ export interface PendingEffect {
 ### SessionStore 接口
 
 ```ts
+export interface SessionRecoveryWarning {
+  kind: "unknown" | "cancelled";
+  effect: PendingEffect;
+  message: string;
+}
+
 export interface SessionSnapshot {
   metadata: SessionMetadata;
   messages: AgentMessage[];
@@ -178,6 +224,7 @@ export interface SessionSnapshot {
   followUpQueue: AgentMessage[];
   pendingEffects: PendingEffect[];   // started 减去 finished/cancelled
   cancelledEffects: PendingEffect[]; // effect_cancelled 对应的记录，供诊断展示
+  recoveryWarnings: SessionRecoveryWarning[];
 }
 
 export interface SessionStore {
@@ -188,7 +235,20 @@ export interface SessionStore {
 }
 ```
 
-`load` 对不存在的 sessionId 抛 `SessionNotFoundError`；`Agent` 捕获后走 create 分支（"打开不存在 = 新建"）。
+对应的 AgentEvent 只负责传输已经稳定存在于 Snapshot 中的诊断：
+
+```ts
+type AgentEvent =
+  | /* 现有事件 */
+  | {
+      type: "session_recovery_warning";
+      warnings: readonly SessionRecoveryWarning[];
+    };
+```
+
+该事件不改变 Transcript，也不由 Agent 构造函数自动发射。
+
+`load` 对不存在的 sessionId 抛 `SessionNotFoundError`；`openOrCreateSession()` 捕获后走 Create 分支（“打开不存在 = 新建”），`Agent` 不直接处理 Store 错误。
 
 ### JSONL 目录约定
 
@@ -204,40 +264,55 @@ export interface SessionStore {
 ### 恢复入口
 
 ```ts
+export interface OpenedSession {
+  snapshot: SessionSnapshot;
+  committer: SessionCommitter;
+}
+
+export async function openOrCreateSession(options: {
+  store: SessionStore;
+  sessionId: string;
+  systemMessage: SystemMessage;
+  now?: () => Date;
+}): Promise<OpenedSession>;
+
 interface AgentOptions {
   // ...现有字段
-  sessionStore?: SessionStore;   // 不传 = 纯内存，行为零变化
-  sessionId?: string;            // 传了 = 从 store 恢复；store 里不存在则新建
+  initialSession?: SessionSnapshot;
+  sessionCommitter?: SessionCommitter;
   idGenerator?: IdGenerator;
 }
 ```
 
-构造时 `sessionStore.load(sessionId)` → 重放 JSONL（只取最后一次 `reset` 之后）→ 得到 `SessionSnapshot` → 填充 `Agent.state`。
+`openOrCreateSession()` 先异步执行 `load()`；不存在时写 Header 与初始 System Message Commit。完成后才同步构造 `Agent`。`initialSession` 与 `sessionCommitter` 必须同时存在或同时缺省，禁止半配置状态。
+
+传入 `initialSession` 时，`Agent` 直接使用 Snapshot Messages，不能再根据 `systemPrompt` 额外创建第二条 System Message；未启用持久化时才沿用现有构造逻辑创建初始 System Message。
 
 ### 恢复重建什么
 
 ```text
 SessionStore.load(sessionId)
-    ↓ 逐行重放 SessionRecord（从最后一次 reset 之后开始）
+    ↓ 逐行重放 Header 与 Commit Envelope
 SessionSnapshot {
-  messages,          ← message 记录按 sequence 排序
+  messages,          ← 按 Commit sequence 和 operations 顺序重放
   steeringQueue,     ← enqueued 减 dequeued
   followUpQueue,     ← 同上
   pendingEffects,    ← started 减 finished 减 cancelled
   cancelledEffects,  ← cancelled 对应记录
-  metadata
+  recoveryWarnings,
+  metadata           ← updatedAt 取最后有效 Commit timestamp
 }
     ↓
 Agent.state.messages / 队列 = snapshot 内容
 ```
 
 - **明确不重建**：`streamingMessage`、`isStreaming`、进行中的 Promise、AbortController、WebSocket 客户端集合——恢复后 Agent 一定处于空闲态。
-- `pendingEffects` 非空 → 恢复完成后发 `session_recovery_warning` 事件，携带两类清单：`unknown`（崩溃中断，outcome unknown）与 `cancelled`（主动取消，副作用可能部分发生）。**只诊断、不阻塞**，后续 prompt/continue 照常。
-- 新增 `session_committed` 事件：每次成功落盘后发，供 server/web 做"已保存"指示。
+- `pendingEffects` 和 `cancelledEffects` 被转换成 `recoveryWarnings` 稳定保存在 Snapshot。Server 在 Socket 已绑定并发送完整 State 后，再发送恢复警告；不会因为 Agent 构造期间尚无订阅者而丢失。
+- 不增加 `session_committed` AgentEvent。由于 AgentEvent Listener 是可等待且可能抛错的，把“已持久化”事件放进同一失败通道会造成“磁盘已提交但调用方收到失败”的假象。需要保存指示时，由 Committer 或 Server 使用独立、非事务性的观察接口。
 
 ### continue() 尾部规则
 
-`continue()` 先 drain steering/followUp 队列（现有行为），**再看 drain 后的新尾部**：
+`continue()` 先检查 steering/followUp 是否存在可预留消息，但不从 Queue 删除；然后根据“当前尾部 + 即将提交的 Reservation”判断：
 
 | drain 后尾部 | 行为 |
 |---|---|
@@ -253,7 +328,7 @@ Agent.state.messages / 队列 = snapshot 内容
 
 ### 队列恢复的边界情况
 
-崩溃发生在 dequeue 落盘后、message 落盘前：由于两者在同一批 append 中，该窗口极小；若仍发生（批内部分写入+截断），截断容错丢弃尾部不完整记录，消息恢复后既不在队列也不在历史——**接受丢失**，恢复诊断体现"dequeued 但无对应 message"。
+`queue_dequeued` 与对应 `message` 位于同一条 Commit Envelope JSONL 行。崩溃导致该行尾部截断时，Loader 丢弃整个不完整 Envelope，因此 Queue Message 仍由之前的 `queue_enqueued` Commit 恢复，不会出现只 Dequeue、未 Message 的半提交状态。
 
 ## Server 协议与 Session 管理
 
@@ -268,7 +343,7 @@ SessionManager
 └── getOrOpen(sessionId): Promise<AgentSession>
 ```
 
-`open_session` 时：缓存命中直接用；未命中 → `AgentFactory` 装配 `new Agent({ sessionStore, sessionId, ... })`（core 负责恢复）→ 挂进缓存。**Server 不解析 JSONL**，一切恢复逻辑在 core。教学项目的 mock stream 对恢复出的历史照常工作（它不依赖历史内容）。
+`open_session` 时：缓存命中直接用；未命中 → `await openOrCreateSession(...)` → `AgentFactory` 用返回的 Snapshot/Committer 同步构造 Agent → 挂进缓存。`SessionManager` 还要维护 `Map<sessionId, Promise<AgentSession>>` 的 in-flight Open，避免两个连接同时打开同一未缓存 Session 时创建两个 Agent。**Server 不解析 JSONL**，一切重放逻辑在 core。
 
 ### 协议扩展（protocol.ts）
 
@@ -286,7 +361,7 @@ export type ServerMessage =
   | { type: "session_error"; message: string };
 ```
 
-`parseCommand` 返回值加富为判别结果（合法命令 / 非法参数 / 不认识的命令），以区分"Unrecognized command"与"sessionId 非法 → `session_error`"。新 core 事件 `session_committed` / `session_recovery_warning` **走现有 `event` 通道透传**，server 无需特判。
+`parseCommand` 返回值加富为判别结果（合法命令 / 非法参数 / 不认识的命令），以区分"Unrecognized command"与"sessionId 非法 → `session_error`"。`session_recovery_warning` 使用现有 `{ type: "event"; event }` 通道，但由 Server 在连接已绑定、完整 State 已发送后根据 Snapshot 主动发布。
 
 ### 连接与 Session 的绑定
 
@@ -297,14 +372,14 @@ export type ServerMessage =
 
 ### reset 的持久化语义
 
-`reset` 命令：Agent 清空内存状态并向 JSONL 追加 `{ type: "reset" }` 记录，随后广播现有 `reset` 消息。**不删文件、不截断**——重放时只取最后一次 reset 之后的内容，历史完整可追溯。
+`reset` 命令先构造新的 System Message，再把 `{ type: "reset", systemMessage }` 作为单个 Commit Envelope 写盘。成功后才把内存状态重置为该 System Message 并广播现有 `reset` 消息；失败则内存保持不变。**不删文件、不截断**，Header 和 Reset 前历史仍可审计。
 
 ## 错误处理
 
 | 场景 | 行为 |
 |---|---|
 | `append` 失败（磁盘满等） | 非流式消息不 emit `message_start`；流式消息不 emit `message_end`；消息不进历史，Turn 以失败收场，`errorMessage` 进 state |
-| emitFailure 的 error 消息落盘失败 | 丢弃该消息，不递归；错误只进 state |
+| emitFailure 的 error 消息落盘失败 | 丢弃该消息，不递归；Agent 通过非持久化的内部失败状态直接设置 `state.errorMessage`，等待 Server 的 State 重发，不伪造 `message_end` |
 | `load` 时 sessionId 不存在 | 抛 `SessionNotFoundError` → Agent 走 create 分支写 session header |
 | JSONL 最后一行截断 | 丢弃该行 + 记录诊断（崩溃写一半的正常形态） |
 | JSONL 中间行损坏 | 抛错——非正常崩溃能造成，说明文件被手工破坏，不静默吞掉 |
@@ -312,7 +387,7 @@ export type ServerMessage =
 | `effect_started` 无结局记录 | 恢复后发 `session_recovery_warning`（unknown 类），不自动重放、不伪装成败 |
 | 工具被 abort 取消 | 写 `effect_cancelled`，恢复警告中单独列为 cancelled 类，不算 unknown |
 
-JSONL 写入细节：每条记录序列化为一整行后单次 `appendFile` 调用，极小化写一半的窗口；文件句柄不常驻，每次 append 独立打开/关闭——教学项目用性能换简单可靠。并发工具的多次 append 由 Committer 内部串行写队列排序。
+JSONL 写入细节：每个逻辑提交先把全部 Operation 包装成一个 Commit Envelope，再序列化为一整行并执行一次 `appendFile`。文件句柄不常驻，每次 Commit 独立打开/关闭；并发工具提交由 Committer 内部串行队列排序。`appendFile` 仍不保证物理事务，但尾部部分写入只会形成一条不完整 JSON 行，恢复时整批丢弃。
 
 ## 测试策略
 
@@ -320,14 +395,17 @@ core 测试全部确定性：注入 `IdGenerator`（各构造点统一 helper）
 
 1. **契约测试共享**：同一组用例跑 `MemorySessionStore` 与 `JsonlSessionStore` 两个实现。
 2. 新 Session 写 header + 消息；重建 Store 后恢复相同 Transcript。
-3. 截断最后半行 → 忽略该记录 + 诊断。
+   恢复构造不得重复添加 System Message。
+3. 截断最后半行 → 忽略整个 Commit Envelope + 诊断，不应用其中任何 Operation。
 4. `failNextAppend()` → 非流式消息不 emit `message_start`，流式消息不 emit `message_end`，消息不进历史。
-5. 队列 enqueue/dequeue 重放后状态正确；dequeue 与 message 记录在同批 append 中且顺序正确。
+5. Queue Reservation 在 Commit 失败时保留于内存；成功时 Dequeue 与 Message 位于同一 Envelope 并一起重放。
 6. `effect_started` 无结局 → 恢复警告 unknown 类含该 toolCallId；`effect_cancelled` → 归 cancelled 类，不产生 unknown 告警。
 7. `continue()` 尾部规则：drain 后 User/ToolResult 尾部可继续；Assistant 尾部/空 Transcript 拒绝；现有"assistant 尾部 + 队列非空可继续"路径回归不破。
 8. 两个 Session 文件互不影响。
-9. `reset` 记录：重放只取最后一次 reset 之后；reset 前的历史仍在文件中。
-10. server 集成：`open_session` 恢复历史；断线重连先收完整 state 再收增量事件；同 session 并发 prompt 第二个收到错误。
+9. `reset` Operation：恢复后保留新 System Message并清空 Queue；未结/已取消 Effect 继续保留诊断，Header Metadata 仍存在。
+10. `updatedAt` 等于最后有效 Commit Timestamp；Sequence 缺洞或倒退时 Load 失败。
+11. Recovery Warning 在客户端绑定后发送，不因构造期间无订阅者丢失。
+12. server 集成：并发 `open_session` 复用同一个 in-flight Promise；断线重连先收完整 State，再收 Warning 和增量事件。
 
 ## 验收标准
 

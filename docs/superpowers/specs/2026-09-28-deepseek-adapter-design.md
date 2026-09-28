@@ -9,13 +9,13 @@
 
 `packages/core/src/mock-llm.ts` 是确定性状态机，无法验证真实模型的鉴权、流式、Tool Call 与错误行为。本阶段接入真实模型，同时保持 Agent Runtime 与供应商解耦。
 
-**关键取舍**：不手写 fetch/SSE 解析与增量 Tool Call 组装，改用 ai-sdk v5（`ai` + `@ai-sdk/deepseek`，已在 plugins 包安装并验证）。注意：`jev-demo.ts` 只验证过 `createDeepSeek` + `generateObject`；本阶段的核心路径 `streamText` / `fullStream` / 无 execute 的 tool 声明是首次使用（其 API 形状已对照 node_modules 类型定义核实）。`StreamFn` 仍是核心边界，适配器是核心与 ai-sdk 之间的防腐层。
+**关键取舍**：不手写 fetch/SSE 解析与增量 Tool Call 组装，改用当前锁定版本 `ai@5.0.267` + `@ai-sdk/deepseek@1.0.59`。这两个依赖目前只在 plugins 包用于 `jev-demo.ts`；实现时移动为新 Provider 包的直接、精确版本依赖，并从 plugins 移除不再需要的依赖。注意：`jev-demo.ts` 只验证过 `createDeepSeek` + `generateObject`；本阶段的核心路径 `streamText` / `fullStream` / 无 execute 的 tool 声明是首次使用（其 API 形状已对照 node_modules 类型定义核实）。`StreamFn` 仍是核心边界，适配器是核心与 ai-sdk 之间的防腐层。
 
 **范围限定**：
 
 - 只接入 DeepSeek 一个供应商；
 - 不做 OAuth、模型目录、自动路由；
-- 不做自动重试（retry policy 另有设计文档，本阶段只落地其错误模型并映射 code）；
+- 不在 Provider 内做自动重试：调用 `streamText` 时显式设置 `maxRetries: 0`，所有重试统一由 Runtime Retry Policy 控制；
 - 不修改 web 客户端；
 - assistant 消息不增加 usage / model 元数据字段（YAGNI，后续可补）。
 
@@ -81,8 +81,23 @@ export type StreamFn = (request: ModelRequest) => AsyncIterable<ModelStreamEvent
 ```
 
 - `agent-loop` 每次调用前从 `AgentContext.tools` 投影 `ToolDeclaration`（只取 name / description / parametersSchema，执行函数不外泄）。
-- `requestId` 由循环层为每次模型调用生成：`runAgentLoop` 目前没有 turn 计数器，需新增一个内部递增序号（如 `req-1`、`req-2`）。重试时复用还是新生成 requestId，由 retry 阶段定义，本阶段只需保证每次调用有唯一 id。
+- `requestId` 由可注入的 `RequestIdGenerator` 生成，默认 `crypto.randomUUID()`，测试注入确定性生成器。新的 Turn/模型请求生成新 ID；同一次逻辑请求的所有重试复用同一个 `ModelRequest` 和 `requestId`。
 - `mock-llm` 同步改为新签名，忽略 tools。
+
+```ts
+export type RequestIdGenerator = () => string;
+```
+
+Retry Policy 的 `streamWithRetry` 使用与 StreamFn 参数无关的 `startAttempt` 闭包：
+
+```ts
+streamWithRetry({
+  startAttempt: () => config.stream(request),
+  // ...
+});
+```
+
+因此阶段 3 与阶段 6 不需要维护两套重试实现。
 
 **签名变更波及面（完整枚举）**：
 
@@ -119,11 +134,23 @@ export type ModelErrorCode =
 
 export class ModelError extends Error {
   readonly code: ModelErrorCode;
-  readonly retryable: boolean;
-  readonly retryAfterMs?: number; // 供应商建议等待（如 429 Retry-After），毫秒
+  readonly retryableOverride?: boolean;
+  readonly retryAfterMs?: number;
+
+  constructor(
+    code: ModelErrorCode,
+    message: string,
+    options?: {
+      retryableOverride?: boolean;
+      retryAfterMs?: number;
+      cause?: unknown;
+    },
+  );
 }
 
-/** 已是 ModelError 则原样返回；否则包装成 code "unknown"、retryable false。 */
+export function isRetryableModelError(code: ModelErrorCode): boolean;
+
+/** 已是 ModelError 则原样返回；否则包装成 code "unknown"。 */
 export function toModelError(error: unknown): ModelError;
 ```
 
@@ -164,6 +191,21 @@ toolResult  → { role: "tool", content: [{ type: "tool-result", toolCallId, too
 
 core 的 `ToolDeclaration.parameters` 是裸 JSON Schema 对象，ai-sdk 的 `inputSchema` 需要 `FlexibleSchema`——用 ai 包导出的 **`jsonSchema()`** 包装。tool 只给 `description` + `inputSchema`，**不给 `execute`**（ai-sdk 对此有明确语义：无 execute 则不自动执行），模型发 tool-call 后停住，执行权回到 agent-loop——保持"模型只描述、循环层执行"的原则。
 
+调用 `streamText` 时必须显式设置：
+
+```ts
+streamText({
+  model,
+  messages,
+  tools,
+  abortSignal: request.signal,
+  maxRetries: 0,
+  maxOutputTokens: options.maxOutputTokens,
+});
+```
+
+ai-sdk v5 的 `streamText` 默认 `maxRetries` 为 2；不显式关闭会绕过 Runtime 的重试事件、预算和首事件锁定。
+
 ### 事件映射（adapter.ts）
 
 消费 `streamText().fullStream`（已对照 ai@5 类型定义核实）：
@@ -174,6 +216,7 @@ text-delta    → text_delta  取 part.text（注意：fullStream 层字段名�
 tool-call     → tool_call   part.input 已是按 inputSchema 解析校验后的对象，直接放入 ToolCall.arguments: unknown
 finish        → end         stopReason 映射（见下）
 error         → 映射为 ModelError 抛出（翻译落点见上节）
+abort         → 显式抛出 request.signal.reason 或 AbortError
 其余 part     → 显式忽略     text-start/end、reasoning-*、tool-input-*、start-step/finish-step、raw 等十余种
 ```
 
@@ -182,28 +225,48 @@ error         → 映射为 ModelError 抛出（翻译落点见上节）
 **stopReason 映射**（finish part 的 `finishReason`，取值为 `'stop' | 'length' | 'content-filter' | 'tool-calls' | 'error' | 'other' | 'unknown'`）：
 
 ```text
-"stop"        → "stop"
-"tool-calls"  → "toolUse"
-其余值         → "stop"，errorMessage 注明原始 finishReason
+"stop"          → "stop"
+"tool-calls"    → "toolUse"
+"length"        → "stop"，errorMessage 标注输出被截断
+"content-filter"→ "error"，errorMessage 标注内容过滤
+"error"         → 抛 ModelError("server", ...)
+"other/unknown" → "error"，不能静默伪装成正常完成
 ```
 
-**abort 不走 finish 事件**：中止时 ai-sdk 让流以 `AbortError`（普通 Error，`name === "AbortError"`，不是 APICallError）拒绝，经 `Agent.emitFailure` 的 `signal.aborted` 分支得到 `stopReason: "aborted"`——与 mock 的取消语义一致（mock 同样靠抛错传导）。适配器只需把 `abortSignal: request.signal` 透传给 `streamText`。
+**abort 不走 finish 事件**：当前 ai-sdk v5 的 `fullStream` 会产出 `{ type: "abort" }` 并关闭流，不保证以异常拒绝。适配器必须显式处理该 Part：
+
+```ts
+case "abort":
+  request.signal.throwIfAborted();
+  throw new DOMException("Model request aborted", "AbortError");
+```
+
+`Agent.emitFailure` 依据同一个 `request.signal.aborted` 生成 `stopReason: "aborted"`。不能把 Abort 当成“其余 Part”忽略，否则流会在没有 `end` 的情况下结束。
 
 ### 错误映射
 
-ai-sdk v5 的错误形态（已核实）：HTTP 错误是 `APICallError`（`statusCode?: number`、`isRetryable: boolean`、`responseBody?: string`，从 `ai` 主入口再导出）；**网络异常没有独立类型**——fetch 失败被包装成 `statusCode === undefined`、`isRetryable: true` 的 `APICallError`。
+ai-sdk v5 的错误形态（已核实）：HTTP 错误是 `APICallError`（`statusCode?: number`、`isRetryable: boolean`、`responseBody?: string`，从 `ai` 主入口再导出）；**网络异常没有独立类型**——fetch 失败被包装成 `statusCode === undefined`、`isRetryable: true` 的 `APICallError`。类型判断使用 `APICallError.isInstance(error)`，不依赖可能受重复依赖影响的 `instanceof`。
 
 ```text
-APICallError statusCode 401 / 403 → authentication（retryable: false）
-APICallError statusCode 429       → rate_limit（retryable: true；从 responseHeaders 提取 Retry-After → retryAfterMs）
-APICallError statusCode 408       → timeout（retryable: true）
-APICallError statusCode 5xx       → server（retryable: true）
-APICallError statusCode 400       → invalid_request（retryable: false）
-APICallError statusCode undefined → network（retryable: true）
-其他未知错误                       → toModelError() 兜底（unknown，retryable: false）
+APICallError statusCode 401 / 403 → authentication
+APICallError statusCode 429       → rate_limit；提取 Retry-After → retryAfterMs
+APICallError statusCode 408       → timeout
+APICallError statusCode 5xx       → server
+APICallError statusCode 400       → invalid_request
+APICallError statusCode undefined → network
+其他未知错误                       → toModelError() 兜底（unknown）
 ```
 
-errorMessage 截取限长（500 字符），且不得包含 apiKey。
+默认是否重试由 Retry Policy 的 `isRetryableModelError(code)` 决定，Adapter 不重复写 `retryableOverride`。只有 Provider 明确推翻默认分类时才使用 Override。
+
+`Retry-After` 解析同时支持：
+
+```text
+Retry-After: 10
+Retry-After: Wed, 21 Oct 2026 07:28:00 GMT
+```
+
+秒数转换为毫秒；HTTP Date 使用注入的 `now()` 计算非负差值；非法值或过去时间返回 `undefined`。errorMessage 截取限长（500 字符），显式移除 `apiKey`，并保留原 `APICallError` 为 `cause`。
 
 ## Server 集成
 
@@ -223,6 +286,7 @@ MINI_AGENT_PROVIDER
 - **环境变量加载**：server 的 dev 脚本参照 plugins 的现成模式加 `--env-file=.env`（`.env` 不入库）；也可直接用 shell 环境变量；
 - `Agent` 构造签名不变，仅 stream 来源变化——"切换 Provider 不改 Agent Loop"的验收标准由此保证（本阶段对循环层的唯一改动是上文 ModelRequest 投影）；
 - server 增加对 `@mini-agent/providers-deepseek` 的 workspace 依赖；
+- 新 Provider 包使用精确依赖 `ai: "5.0.267"`、`@ai-sdk/deepseek: "1.0.59"`；修改 Manifest 后用 `pnpm install --lockfile-only --ignore-scripts` 刷新 Lockfile；
 - server 现有测试（`session.test.ts` 直接调用 `createAgent()`）不设置 `MINI_AGENT_PROVIDER`，走 mock 分支，不受影响。
 
 ## 测试策略
@@ -234,11 +298,15 @@ MINI_AGENT_PROVIDER
 1. 流式 text-delta → 事件序列与累计快照正确（模拟层 chunk 是 `LanguageModelV2StreamPart`，字段名 `delta`；以 `{type:'stream-start', warnings:[]}` 开头，`finish` chunk 带 `usage` + `finishReason`）；
 2. 完整 tool-call → 单个 `tool_call` 事件，arguments 为解析后的对象；
 3. tool-call `invalid: true` → `ModelError{ code: "invalid_request" }`；
-4. `finishReason: "tool-calls"` → `stopReason: "toolUse"`；
-5. 429 → `ModelError{ code: "rate_limit", retryable: true }`；401 → `authentication, retryable: false`；无 statusCode 的 APICallError → `network`（错误可用 doStream emit `{type:'error', error}` chunk 或直接 throw 模拟）；
-6. 消息映射纯函数：四种角色（含 assistant 混合 content、tool-result 的 output 包装）→ 正确 ModelMessage；
-7. abort → 流终止；
-8. 冒烟脚本 `pnpm demo:deepseek`（放在新包的 package.json，参照 plugins 用 `--env-file=.env`；手动运行，不进测试套件）：真实 API 跑"读 package.json"流程。
+4. `finishReason: "tool-calls"` → `stopReason: "toolUse"`；`"error"` 不得映射成成功；`length/content-filter/unknown` 按表处理；
+5. `streamText` 调用参数包含 `maxRetries: 0`；
+6. 429 → `ModelError{ code: "rate_limit", retryAfterMs }`；401 → `authentication`；无 statusCode 的 APICallError → `network`，不重复保存默认 retryable 布尔值；
+7. `Retry-After` 秒数、HTTP Date、非法值和过去时间均有确定性测试；
+8. `fullStream` 的 `abort` Part 会抛取消错误，最终 Agent 状态为 aborted，且不产生 `end`；
+9. 消息映射纯函数：四种角色（含 assistant 混合 content、tool-result 的 output 包装）→ 正确 ModelMessage；
+10. API Key 不出现在映射后的 ModelError Message、Cause 摘要、事件或序列化输出；
+11. 同一次 Runtime Retry 的所有 Attempt 收到同一个 ModelRequest/requestId；
+12. 冒烟脚本 `pnpm demo:deepseek`（放在新包的 package.json，参照 plugins 用 `--env-file=.env`；手动运行，不进测试套件）：真实 API 跑"读 package.json"流程。
 
 **core 包**：
 
@@ -258,7 +326,7 @@ MINI_AGENT_PROVIDER
 ## 明确不做
 
 - 多供应商；
-- 自动重试（仅落地错误模型与 code 映射，策略本身属于 retry 阶段）；
+- Provider 内部自动重试（`maxRetries: 0`）；Runtime Retry Policy 仍可在阶段 3 配置后统一重试；
 - assistant 消息 usage / model / responseId 元数据（finish part 里是 `totalUsage`，本阶段忽略）；
 - 手写 SSE 解析与增量 Tool Call 组装（由 ai-sdk 承担）；
 - web 客户端改动。

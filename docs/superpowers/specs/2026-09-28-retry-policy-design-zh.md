@@ -44,7 +44,7 @@
 | 策略是纯决策 | `RetryPolicy.decide()` 不 sleep、不发事件、不感知 Loop |
 | 重试复用同一请求 | prepare/transform 跑一次，每次尝试使用同一份 `requestMessages` |
 | 重试事件不进 Transcript | `model_retry_*` 只是观察信号，不产生消息生命周期事件 |
-| 未配置策略时行为零变化 | 未传 `retryPolicy` 时单次尝试，现有测试与调用方全部不受影响 |
+| 未配置策略时不引入重试行为 | 未传 `retryPolicy` 时保持单次尝试；仅新增“流必须以 `end` 完成”的协议校验 |
 
 ## 错误模型
 
@@ -63,10 +63,27 @@ export type ModelErrorCode =
 
 export class ModelError extends Error {
   readonly code: ModelErrorCode;
-  readonly retryable: boolean;
+  /**
+   * 仅在供应商明确知道默认分类不适用时覆盖。
+   * 未提供时由 isRetryableModelError(code) 决定。
+   */
+  readonly retryableOverride?: boolean;
   /** 供应商建议的等待时间（如 429 的 Retry-After），单位毫秒。 */
   readonly retryAfterMs?: number;
+
+  constructor(
+    code: ModelErrorCode,
+    message: string,
+    options?: {
+      retryableOverride?: boolean;
+      retryAfterMs?: number;
+      cause?: unknown;
+    },
+  );
 }
+
+/** ModelErrorCode 的唯一默认重试分类来源。 */
+export function isRetryableModelError(code: ModelErrorCode): boolean;
 ```
 
 默认重试分类：
@@ -85,11 +102,18 @@ export class ModelError extends Error {
 归一化辅助函数：
 
 ```ts
-/** 已是 ModelError 则原样返回；否则包装成 code "unknown"、retryable false。 */
+/** 已是 ModelError 则原样返回；否则包装成 code "unknown"。 */
 export function toModelError(error: unknown): ModelError;
 ```
 
-策略接口因此永远只看到 `ModelError`，自定义策略不需要重复写归一化逻辑。错误分类的责任在 StreamFn 实现一侧：Mock Stream 直接抛 `ModelError`，真实适配器（阶段 6）负责把供应商 HTTP 错误映射成对应 code。
+`code` 是默认分类的唯一事实来源，避免出现 `code: "authentication"` 却同时设置 `retryable: true` 的矛盾对象。默认策略使用：
+
+```ts
+const retryable =
+  error.retryableOverride ?? isRetryableModelError(error.code);
+```
+
+只有供应商明确知道默认分类不适用时才设置 `retryableOverride`。策略接口永远只看到 `ModelError`，自定义策略不需要重复写归一化逻辑。错误分类的责任在 StreamFn 实现一侧：Mock Stream 直接抛 `ModelError`，真实适配器（阶段 6）负责把供应商 HTTP 错误映射成对应 code。
 
 ## RetryPolicy 接口
 
@@ -98,8 +122,8 @@ export interface RetryContext {
   /** 已完成的尝试次数：第一次失败时 attempt 为 1。 */
   attempt: number;
   error: ModelError;
-  /** 从首次尝试开始累计的墙钟毫秒数。 */
-  elapsedMs: number;
+  /** 之前已经完成的退避等待总毫秒数，不包含模型执行和事件处理耗时。 */
+  totalDelayMs: number;
 }
 
 export type RetryDecision =
@@ -114,7 +138,7 @@ export interface RetryPolicy {
 export type SleepFn = (ms: number, signal: AbortSignal) => Promise<void>;
 ```
 
-`RetryPolicy` 是纯决策：不 sleep、不发射事件、不知道自己在 Loop 的哪个 Turn。可测试性来自两个注入点：假 `sleep`（零真实等待）和确定性 `random`（消除 jitter 随机性）。
+`RetryPolicy` 是纯决策：不 sleep、不发射事件、不知道自己在 Loop 的哪个 Turn。`streamWithRetry` 在每次等待成功后累计 `totalDelayMs`，因此假 `sleep` 不需要推进真实墙钟也能精确测试预算。可测试性来自两个注入点：假 `sleep`（零真实等待）和确定性 `random`（消除 jitter 随机性）。
 
 ## 默认策略
 
@@ -147,16 +171,17 @@ export function createDefaultRetryPolicy(
 
 决策规则按顺序短路：
 
-1. `error.retryable === false` → `{ retry: false }`；
+1. `error.retryableOverride ?? isRetryableModelError(error.code)` 为 `false` → `{ retry: false }`；
 2. `attempt > maxRetries` → `{ retry: false }`（`attempt` 是刚失败的尝试编号，1 表示首次尝试失败）；
-3. `delay = min(error.retryAfterMs ?? baseDelayMs × factor^(attempt-1), maxDelayMs)`；
-4. 乘上 jitter：`delay × (1 + jitterRatio × (2 × random() - 1))`；
-5. `elapsedMs + delay > maxTotalDelayMs` → `{ retry: false }`；
-6. 否则 `{ retry: true, delayMs }`。
+3. 如果存在 `error.retryAfterMs`，则 `candidateDelay = retryAfterMs`，不应用 jitter，避免早于供应商建议时间重试；
+4. 否则 `baseDelay = baseDelayMs × factor^(attempt-1)`，再计算 `candidateDelay = baseDelay × (1 + jitterRatio × (2 × random() - 1))`；
+5. `delay = min(candidateDelay, maxDelayMs)`，保证最终值不突破单次上限；
+6. `totalDelayMs + delay > maxTotalDelayMs` → `{ retry: false }`；
+7. 否则 `{ retry: true, delayMs: delay }`。
 
-`retryAfterMs` 覆盖指数退避结果，但仍受 `maxDelayMs` 与总预算约束——供应商不能单方面撑爆等待预算。
+`retryAfterMs` 覆盖指数退避结果且不应用 jitter，但仍受 `maxDelayMs` 与总预算约束——供应商不能单方面撑爆等待预算。
 
-策略未配置时不重试（opt-in）：`AgentOptions.retryPolicy` 缺省为 `undefined`，模型调用退化为单次尝试，行为与现状逐字节一致。需要重试的调用方显式传入 `createDefaultRetryPolicy()` 或自定义策略。
+策略未配置时不重试（opt-in）：`AgentOptions.retryPolicy` 缺省为 `undefined`，模型调用保持单次尝试。除所有调用都必须遵守“流以 `end` 完成”的协议校验外，正常模型输入、事件顺序和队列行为保持不变。需要重试的调用方显式传入 `createDefaultRetryPolicy()` 或自定义策略。
 
 ## streamWithRetry 与首事件锁定
 
@@ -164,9 +189,11 @@ export function createDefaultRetryPolicy(
 
 ```ts
 export interface StreamRetryOptions {
-  stream: StreamFn;
-  /** 每次尝试复用同一份请求消息（prepare/transform 只跑一次）。 */
-  messages: readonly AgentMessage[];
+  /**
+   * 启动一次模型尝试。调用方闭包捕获已经准备好的请求，
+   * 因此重试层不依赖 StreamFn 的具体参数形状。
+   */
+  startAttempt: () => AsyncIterable<ModelStreamEvent>;
   policy: RetryPolicy;
   sleep: SleepFn;
   signal: AbortSignal;
@@ -181,17 +208,20 @@ export async function* streamWithRetry(
 
 语义：
 
-1. `attempt` 从 1 开始递增；`startedAt` 记录首次尝试的墙钟起点。
-2. 每次尝试内部维护 `locked = false`；迭代器每 yield 一个事件后置为 `true`。
+1. `attempt` 从 1 开始递增；`totalDelayMs` 从 0 开始，只累计已经完成的退避等待。
+2. 每次尝试内部维护 `locked = false` 和 `receivedEnd = false`；准备向消费端 yield 第一个事件前先置 `locked = true`，遇到 `end` 时置 `receivedEnd = true`。
 3. 尝试抛错（调用即抛或迭代中抛）时：
    - 先 `toModelError(error)` 归一化；
    - `signal.aborted` → 原样向上抛（abort 不走重试决策）；
    - `locked === true` → 直接向上抛，**不询问策略**；
-   - 未锁定 → `policy.decide({ attempt, error, elapsedMs })`；
+   - 未锁定 → `policy.decide({ attempt, error, totalDelayMs })`；
      - 拒绝 → 向上抛；
-     - 接受 → `emit(model_retry_scheduled)` → `await sleep(delayMs, signal)` → `emit(model_retry_started)` → 进入下一次尝试。
-4. `sleep` 因 abort reject 时原样向上抛。
-5. 成功尝试的事件原样 yield 给消费端。
+     - 接受 → `emit(model_retry_scheduled)` → `await sleep(delayMs, signal)` → `totalDelayMs += delayMs` → `emit(model_retry_started)` → 进入下一次尝试。
+4. 原始流正常结束但没有产生 `end` 时，包装成 `code: "network"` 的 `ModelError("Model stream ended before end event")`：
+   - 首事件前结束：未锁定，可由策略重试；
+   - 已产生 `start` / `text_delta` / `tool_call`：已锁定，直接失败。
+5. `sleep` 因 abort reject 时原样向上抛。
+6. 只有包含 `end` 的成功尝试才算完成，其事件原样 yield 给消费端。
 
 `agent-loop.ts` 的 `streamAssistantResponse` 只改模型调用一处：
 
@@ -199,8 +229,7 @@ export async function* streamWithRetry(
 const stream =
   config.retryPolicy && config.sleep
     ? streamWithRetry({
-        stream: config.stream,
-        messages: requestMessages,
+        startAttempt: () => config.stream(requestMessages, signal),
         policy: config.retryPolicy,
         sleep: config.sleep,
         signal,
@@ -208,10 +237,33 @@ const stream =
       })
     : config.stream(requestMessages, signal);
 
-for await (const modelEvent of stream) { /* 现有逻辑不变 */ }
+let receivedEnd = false;
+for await (const modelEvent of stream) {
+  if (modelEvent.type === "end") receivedEnd = true;
+  // 其余现有事件转换逻辑不变
+}
+if (!receivedEnd) {
+  throw new Error("Model stream ended before end event");
+}
 ```
 
-策略与 sleep 必须同时配置才启用重试；`Agent` 在构造时校验两者同有或同无（只给一个直接抛配置错误）。
+`streamAssistantResponse` 自己也检查 `receivedEnd`，这是无论是否启用重试都生效的协议防线。启用重试时 `streamWithRetry` 会更早识别不完整尝试，从而允许“首事件前 EOF”进入重试决策。
+
+阶段 6 把 `StreamFn` 升级为接收 `ModelRequest` 后，只需把闭包改成：
+
+```ts
+startAttempt: () => config.stream(request)
+```
+
+同一次逻辑模型请求的所有重试必须复用同一个 `request` 对象和 `requestId`；只有新的 Turn/模型请求才创建新 Request。
+
+配置规则统一为：
+
+- 未配置 `retryPolicy`：不启用重试，也不允许单独配置 `sleep`；
+- 配置 `retryPolicy` 但未配置 `sleep`：`Agent` 注入默认可取消 Sleep；
+- 两者都配置：使用调用方提供的 Sleep。
+
+`AgentLoopConfig` 收到的始终是归一化后的组合：要么两者都不存在，要么两者都存在。
 
 ### 为什么首事件锁定
 
@@ -283,7 +335,7 @@ export interface Tool<TParameters> {
 
 ## 错误信息
 
-策略拒绝或达到上限后抛出的 `ModelError` 由 `emitFailure` 变成 error Assistant Message。为了让 UI 直接可读，`streamWithRetry` 在确实尝试过多次后放弃时（`attempt > 1`）重写错误文案：
+策略拒绝或达到上限后抛出的 `ModelError` 由 `emitFailure` 变成 error Assistant Message。为了让 UI 直接可读，`streamWithRetry` 在确实尝试过多次后放弃时（`attempt > 1`）创建一个新的 `ModelError`，重写错误文案并完整保留原错误的 `code`、`retryableOverride`、`retryAfterMs`，同时将原错误放入 `cause`：
 
 ```text
 network error after 4 attempts: connection reset
@@ -295,12 +347,16 @@ network error after 4 attempts: connection reset
 
 ### `packages/core/src/errors.ts`（新增）
 
-- `ModelErrorCode`、`ModelError`、`toModelError`。
+- `ModelErrorCode`、`ModelError`、`isRetryableModelError`、`toModelError`。
 
 ### `packages/core/src/retry.ts`（新增）
 
 - `RetryContext`、`RetryDecision`、`RetryPolicy`、`SleepFn`。
-- `createDefaultRetryPolicy` 与选项校验（次数/延迟必须是正数，`jitterRatio` 在 `[0, 1]`）。
+- `createDefaultRetryPolicy` 与选项校验：
+  - `maxRetries` 必须是非负整数；
+  - `baseDelayMs`、`factor`、`maxDelayMs` 必须大于 0；
+  - `maxTotalDelayMs` 必须大于等于 0；
+  - `jitterRatio` 必须在 `[0, 1]`。
 - 默认 `sleep` 实现（`setTimeout` + abort reject）。
 - `streamWithRetry`。
 
@@ -312,14 +368,14 @@ network error after 4 attempts: connection reset
 
 ### `packages/core/src/agent-loop.ts`
 
-- `streamAssistantResponse` 的模型调用经 `streamWithRetry`（仅当 `retryPolicy` 与 `sleep` 都非空；`Agent` 会为配置了策略的调用方填充默认 sleep）。
-- 消费端 `for await` 逻辑不变。
+- `streamAssistantResponse` 的模型调用经 `streamWithRetry`（仅当归一化后的 `retryPolicy` 与 `sleep` 都非空）。
+- 消费端记录是否收到 `end`；无论是否启用重试，不完整流都不能提交 Assistant Message。
 
 ### `packages/core/src/agent.ts`
 
 - `AgentOptions` 增加 `retryPolicy?: RetryPolicy`、`sleep?: SleepFn`。
 - `sleep` 缺省时填充默认实现（真实 `setTimeout` + abort reject）。
-- 校验：只允许单独缺省 `sleep`；只传 `sleep` 而不传 `retryPolicy` 是配置错误，构造时直接抛错。
+- 校验：只传 `sleep` 而不传 `retryPolicy` 是配置错误；只传 `retryPolicy` 时填充默认 Sleep。
 - 透传到 `AgentLoopConfig`；`processEvent` 对新事件不做状态变更。
 
 ### `packages/core/src/index.ts`
@@ -344,36 +400,41 @@ network error after 4 attempts: connection reset
 ### 策略单元测试（确定性）
 
 1. 默认参数（`maxRetries: 3`、`baseDelayMs: 2000`）下退避序列为 2000 / 4000 / 8000（注入 `random: () => 0.5` 使 jitter 恒为 1，断言精确值）。
-2. `retryable: false` 的错误一律拒绝。
+2. 默认不可重试 Code 一律拒绝；`retryableOverride` 可以显式覆盖默认分类。
 3. `attempt > maxRetries` 拒绝（默认配置下第 4 次尝试失败后拒绝，即首次 + 3 次重试）。
-4. `retryAfterMs` 覆盖指数退避，但不超过 `maxDelayMs`。
+4. `retryAfterMs` 覆盖指数退避、不应用 jitter，并且不超过 `maxDelayMs`。
 5. 累计延迟超过 `maxTotalDelayMs` 拒绝。
 6. jitter 比例生效：`random()` 两端值分别给出 ±10% 的延迟。
+7. `maxRetries: 0` 合法，并在首次失败后拒绝重试。
 
 ### streamWithRetry 行为测试（假 sleep）
 
-7. 第一次在首事件前抛 `network`，第二次成功：产出 `scheduled(2) → started(2)`，最终只有成功流的事件。
-8. 已产出 `text_delta` 后失败：即使错误可重试也直接抛，无重试事件。
-9. 产出 `start` 后即抛错也视为锁定，不重试。
-10. 非 ModelError 异常包装为 `unknown` 且不重试。
-11. 等待期间 abort：sleep reject，不发射 `model_retry_started`，不开始下一尝试。
-12. 达到 `maxRetries` 上限后抛出的错误文案含尝试次数（默认配置下为 4 次尝试）。
-13. 每次尝试收到的 `messages` 是同一份请求（引用相等）。
+8. 第一次在首事件前抛 `network`，第二次成功：产出 `scheduled(2) → started(2)`，最终只有成功流的事件。
+9. 已产出 `text_delta` 后失败：即使错误可重试也直接抛，无重试事件。
+10. 产出 `start` 后即抛错也视为锁定，不重试。
+11. 首事件前正常 EOF 按 `network` 错误进入重试；第二次完整产生 `end` 后成功。
+12. 产出 `start` 后正常 EOF 不重试，并抛出不完整流错误。
+13. 非 ModelError 异常包装为 `unknown` 且不重试。
+14. 等待期间 abort：sleep reject，不发射 `model_retry_started`，不开始下一尝试。
+15. 假 Sleep 不推进墙钟时，`totalDelayMs` 仍按实际决策延迟累计并执行总预算。
+16. 达到 `maxRetries` 上限后抛出的错误文案含尝试次数，且保留原错误的 code、override、retryAfterMs 和 cause。
+17. `startAttempt` 每次闭包捕获的是同一个请求对象；阶段 6 的 `ModelRequest` 和 `requestId` 在重试间引用与值均保持不变。
 
 ### Loop 集成测试
 
-14. 重试成功后 Transcript 只含一条成功 Assistant Message，无重复。
-15. 重试事件序列与 `message_start` 的相对顺序正确（重试事件之前没有任何消息事件）。
-16. 不可重试错误立即产生 `stopReason: "error"` 的 Assistant Message。
-17. abort 期间产出 `stopReason: "aborted"`。
-18. 工具抛错仍是 `isError: true` 的 Tool Result，不触发模型重试策略。
-19. 只配置 `sleep` 而不配置 `retryPolicy` 时构造抛配置错误；只配置 `retryPolicy` 时使用默认 sleep 正常重试。
+18. 重试成功后 Transcript 只含一条成功 Assistant Message，无重复。
+19. 重试事件序列与 `message_start` 的相对顺序正确（重试事件之前没有任何消息事件）。
+20. 不可重试错误立即产生 `stopReason: "error"` 的 Assistant Message。
+21. abort 期间产出 `stopReason: "aborted"`。
+22. 未启用重试时，缺少 `end` 的流仍产生 error Assistant Message，且不会提交 pending Assistant Message。
+23. 工具抛错仍是 `isError: true` 的 Tool Result，不触发模型重试策略。
+24. 只配置 `sleep` 而不配置 `retryPolicy` 时构造抛配置错误；只配置 `retryPolicy` 时使用默认 sleep 正常重试。
 
 ### 回归
 
-20. 未配置 `retryPolicy` 时现有全部 core 测试通过，模型输入、事件顺序、队列优先级不变。
-21. 新类型与工厂可从 `@mini-agent/core` 公共入口导入。
-22. Server 和 Web 无需修改即可构建和运行。
+25. 未配置 `retryPolicy` 时现有全部 core 测试通过；除新增的“不完整流必须失败”协议校验外，模型输入、正常事件顺序和队列优先级不变。
+26. 新类型与工厂可从 `@mini-agent/core` 公共入口导入。
+27. Server 和 Web 无需修改即可构建和运行。
 
 ## 验收标准
 
@@ -381,7 +442,7 @@ network error after 4 attempts: connection reset
 - 不可重试错误立即失败。
 - 所有等待可取消、可在测试中用假 sleep 替换。
 - 工具不被自动重放；`replay` 元数据只被记录。
-- 未配置策略时行为与现状完全一致（opt-in）。
+- 未配置策略时不引入重试行为；除“流必须以 `end` 完成”的协议校验外，正常调用行为保持不变。
 - `pnpm --filter @mini-agent/core run check` 通过。
 - `pnpm --filter @mini-agent/core run test` 通过。
 - Server 和 Web 无需修改即可继续构建和运行。
