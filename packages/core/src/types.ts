@@ -290,6 +290,8 @@ export interface AgentLoopConfig {
   stream: StreamFn;
   getSteeringMessages(): AgentMessage[];
   getFollowUpMessages(): AgentMessage[];
+  hasSteeringMessages(): boolean;
+  hasFollowUpMessages(): boolean;
   prepareNextTurn?: PrepareNextTurn;
   prepareRequest?: PrepareRequest;
   transformContext?: TransformContext;

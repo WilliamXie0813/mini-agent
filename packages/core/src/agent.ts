@@ -62,6 +62,10 @@ class MessageQueue {
     return first ? [first] : [];
   }
 
+  hasMessages(): boolean {
+    return this.messages.length > 0;
+  }
+
   clear(): void {
     this.messages = [];
   }
@@ -262,6 +266,8 @@ export class Agent {
       stream: this.stream,
       getSteeringMessages: () => this.steeringQueue.drainOne(),
       getFollowUpMessages: () => this.followUpQueue.drainOne(),
+      hasSteeringMessages: () => this.steeringQueue.hasMessages(),
+      hasFollowUpMessages: () => this.followUpQueue.hasMessages(),
       beforeToolCall: this.beforeToolCall,
       afterToolCall: this.afterToolCall,
       finishTurn: this.finishTurn,

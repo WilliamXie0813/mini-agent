@@ -233,97 +233,80 @@ export async function runAgentLoop(
   signal: AbortSignal,
 ): Promise<void> {
   await emit({ type: "agent_start" });
-  await emit({ type: "turn_start" }); // 第一个 Turn 的 start 在这里发，后续 Turn 在内层循环顶部发
+  await emit({ type: "turn_start" });
 
-  // 先把本轮输入定稿进历史
   for (const prompt of prompts) {
     await emitMessage(prompt, emit);
     context.messages.push(prompt);
   }
 
-  let pendingMessages = config.getSteeringMessages();
   let completedTurn: CompletedTurn | undefined;
-  // finishTurn 请求了 continue、且当前没有更优先的工作时，标记一次“仅上下文”的额外 Turn
-  let explicitContinuation = false;
   let firstTurn = true;
+  let toolResultsPending = false;
+  let pendingMessages = config.getSteeringMessages();
 
   while (true) {
-    let hasMoreToolCalls = true;
-
-    // ---------- 内层循环：只要还有工具结果要喂回模型、或有 steering 插队，就开新 Turn ----------
-    while (hasMoreToolCalls || pendingMessages.length > 0) {
-      if (!firstTurn) await emit({ type: "turn_start" });
-      firstTurn = false;
-
-      // steering 消息在 Turn 边界投递：定稿并进入历史
-      for (const message of pendingMessages) {
-        await emitMessage(message, emit);
-        context.messages.push(message);
+    if (!firstTurn) {
+      if (!completedTurn) {
+        throw new Error("Missing completed Turn before next Turn");
       }
+      await emit({ type: "turn_start" });
+      signal.throwIfAborted();
+      applyPreparation(
+        context,
+        await config.prepareNextTurn?.(completedTurn, signal),
+      );
       pendingMessages = [];
+      if (config.hasSteeringMessages()) {
+        pendingMessages = config.getSteeringMessages();
+      } else if (!toolResultsPending && config.hasFollowUpMessages()) {
+        pendingMessages = config.getFollowUpMessages();
+      }
+    }
+    firstTurn = false;
 
-      // 一个 Turn 的核心：调模型 → 收集工具调用 → 顺序执行
-      const assistant = await streamAssistantResponse(
-        context,
-        config,
-        emit,
-        signal,
+    for (const message of pendingMessages) {
+      await emitMessage(message, emit);
+      context.messages.push(message);
+    }
+    pendingMessages = [];
+
+    const assistant = await streamAssistantResponse(
+      context,
+      config,
+      emit,
+      signal,
+    );
+    const toolCalls = assistant.content.filter(
+      (content): content is ToolCall => content.type === "toolCall",
+    );
+    const toolResults: ToolResultMessage[] = [];
+    for (const toolCall of toolCalls) {
+      toolResults.push(
+        await executeToolCall(context, toolCall, config, emit, signal),
       );
-      const toolCalls = assistant.content.filter(
-        (content): content is ToolCall => content.type === "toolCall",
-      );
-      const toolResults: ToolResultMessage[] = [];
-
-      // 核心版本只做串行执行；并行是扩展点（ToolExecutionStrategy）
-      for (const toolCall of toolCalls) {
-        toolResults.push(
-          await executeToolCall(context, toolCall, config, emit, signal),
-        );
-      }
-
-      completedTurn = {
-        message: assistant,
-        toolResults,
-        context,
-      };
-      // finishTurn 钩子在 turn_end 事件之前询问，让决策能影响后续调度
-      const decision = await config.finishTurn?.(completedTurn, signal);
-      await emit({ type: "turn_end", message: assistant, toolResults });
-
-      // 钩子明确要求结束：立即收尾整个 run
-      if (decision?.action === "end") {
-        await emit({ type: "agent_end", messages: context.messages.slice() });
-        return;
-      }
-
-      explicitContinuation = decision?.action === "continue";
-      hasMoreToolCalls = toolResults.length > 0;
-      pendingMessages = config.getSteeringMessages();
-      // 工具结果和 steering 都比显式 continue 优先：有正事要干就忘掉 continue
-      if (hasMoreToolCalls || pendingMessages.length > 0) {
-        explicitContinuation = false;
-      }
     }
 
-    // ---------- 外层循环：内层自然停下来了，才轮到 followUp 和显式 continue ----------
-
-    // followUp 只在任务自然完成时被消费（区别于 steering 的“下一个 Turn 边界就插”）
-    const followUps = config.getFollowUpMessages();
-    if (followUps.length > 0) {
-      pendingMessages = followUps;
-      explicitContinuation = false;
-      continue;
+    completedTurn = {
+      message: assistant,
+      toolResults: toolResults.slice(),
+      context: snapshotContext(context),
+    };
+    const decision = await config.finishTurn?.(completedTurn, signal);
+    await emit({ type: "turn_end", message: assistant, toolResults });
+    if (decision?.action === "end") {
+      await emit({ type: "agent_end", messages: context.messages.slice() });
+      return;
     }
 
-    // finishTurn 请求的一次性额外 Turn（消耗掉标记，防止无限续杯）
-    if (explicitContinuation) {
-      explicitContinuation = false;
-      continue;
-    }
-
-    break;
+    toolResultsPending = toolResults.length > 0;
+    const hasNextTurn =
+      toolResultsPending ||
+      config.hasSteeringMessages() ||
+      (!toolResultsPending && config.hasFollowUpMessages()) ||
+      decision?.action === "continue";
+    if (!hasNextTurn) break;
   }
 
-  void completedTurn;
   await emit({ type: "agent_end", messages: context.messages.slice() });
 }

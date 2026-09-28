@@ -37,6 +37,8 @@ test("loop completes user to tool to final answer flow", async () => {
       stream: createMockStream(),
       getSteeringMessages: () => [],
       getFollowUpMessages: () => [],
+      hasSteeringMessages: () => false,
+      hasFollowUpMessages: () => false,
     },
     async (event) => {
       events.push(event);
@@ -99,6 +101,8 @@ test("beforeToolCall can block execution", async () => {
       stream: createMockStream(),
       getSteeringMessages: () => [],
       getFollowUpMessages: () => [],
+      hasSteeringMessages: () => false,
+      hasFollowUpMessages: () => false,
       beforeToolCall: async () => ({
         block: true,
         reason: "Reading files is blocked",
@@ -140,6 +144,8 @@ test("afterToolCall can replace a successful result", async () => {
       stream: createMockStream(),
       getSteeringMessages: () => [],
       getFollowUpMessages: () => [],
+      hasSteeringMessages: () => false,
+      hasFollowUpMessages: () => false,
       afterToolCall: async () => ({
         content: "{\"name\":\"replaced\",\"version\":\"2.0.0\"}",
         isError: false,
@@ -196,6 +202,8 @@ async function runSingleToolCall(
       stream: createSingleToolCallStream(toolCall),
       getSteeringMessages: () => [],
       getFollowUpMessages: () => [],
+      hasSteeringMessages: () => false,
+      hasFollowUpMessages: () => false,
     },
     async () => {},
     new AbortController().signal,
@@ -289,6 +297,8 @@ test("finishTurn can request exactly one extra context-only Turn", async () => {
       stream: createMockStream(),
       getSteeringMessages: () => [],
       getFollowUpMessages: () => [],
+      hasSteeringMessages: () => false,
+      hasFollowUpMessages: () => false,
       finishTurn: async () => {
         turnCount += 1;
         if (!requested) {
@@ -321,6 +331,8 @@ test("finishTurn can stop before a queued follow-up", async () => {
       stream: createMockStream(),
       getSteeringMessages: () => [],
       getFollowUpMessages: () => followUps.splice(0),
+      hasSteeringMessages: () => false,
+      hasFollowUpMessages: () => followUps.length > 0,
       finishTurn: async () => ({ action: "end" }),
     },
     async () => {},
@@ -361,6 +373,8 @@ test("first Turn prepares and transforms request before streaming", async () => 
       stream,
       getSteeringMessages: () => [],
       getFollowUpMessages: () => [],
+      hasSteeringMessages: () => false,
+      hasFollowUpMessages: () => false,
       prepareRequest: async (snapshot) => {
         order.push("prepareRequest");
         return {
@@ -394,4 +408,49 @@ test("first Turn prepares and transforms request before streaming", async () => 
     ),
     true,
   );
+});
+
+test("later Turn starts before prepareNextTurn", async () => {
+  const order: string[] = [];
+  let streamCount = 0;
+  const stream: StreamFn = async function* () {
+    streamCount += 1;
+    order.push(`stream:${streamCount}`);
+    const message: AssistantMessage = {
+      role: "assistant",
+      content: [{ type: "text", text: "done" }],
+      stopReason: "stop",
+      timestamp: streamCount,
+    };
+    yield { type: "start", message };
+    yield { type: "end", message };
+  };
+  await runAgentLoop(
+    [{ role: "user", content: "start", timestamp: 1 }],
+    { messages: [], tools: [] },
+    {
+      stream,
+      getSteeringMessages: () => [],
+      getFollowUpMessages: () => [],
+      hasSteeringMessages: () => false,
+      hasFollowUpMessages: () => false,
+      prepareNextTurn: async () => {
+        order.push("prepareNextTurn");
+        return undefined;
+      },
+      finishTurn: async () =>
+        streamCount === 1 ? { action: "continue" } : undefined,
+    },
+    async (event) => {
+      if (event.type === "turn_start") order.push("turn_start");
+    },
+    new AbortController().signal,
+  );
+  assert.deepEqual(order, [
+    "turn_start",
+    "stream:1",
+    "turn_start",
+    "prepareNextTurn",
+    "stream:2",
+  ]);
 });
