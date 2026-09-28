@@ -1,10 +1,16 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { isAbsolute, join } from "node:path";
+import { tmpdir } from "node:os";
 import {
+  JsonlSessionStore,
+  MemorySessionStore,
+  SessionNotFoundError,
   replaySessionRecords,
   toJsonValue,
 } from "../src/session-store.ts";
-import type { SessionRecord } from "../src/session.ts";
+import type { SessionRecord, SessionStore } from "../src/session.ts";
 import {
   assistantMessage,
   systemMessage,
@@ -135,4 +141,110 @@ test("replay rejects sequence holes and unmatched dequeues", () => {
       ),
     /missing queued message/,
   );
+});
+
+function metadata(id: string) {
+  return {
+    id,
+    createdAt: "2026-09-28T00:00:00.000Z",
+    updatedAt: "2026-09-28T00:00:00.000Z",
+  };
+}
+
+async function storeFactories(): Promise<
+  Array<{ name: string; store: SessionStore }>
+> {
+  const root = await mkdtemp(join(tmpdir(), "mini-agent-session-"));
+  return [
+    { name: "memory", store: new MemorySessionStore() },
+    { name: "jsonl", store: new JsonlSessionStore(root) },
+  ];
+}
+
+test("store implementations share create append load list behavior", async () => {
+  for (const { name, store } of await storeFactories()) {
+    await store.create(metadata(`session-${name}`));
+    await store.append(`session-${name}`, [
+      {
+        type: "commit",
+        sequence: 1,
+        timestamp: "2026-09-28T00:00:01.000Z",
+        operations: [
+          { type: "message", message: systemMessage(`${name}-system`) },
+        ],
+      },
+    ]);
+    const loaded = await store.load(`session-${name}`);
+    assert.equal(loaded.messages[0]?.id, `${name}-system`);
+    assert.equal(loaded.lastSequence, 1);
+    assert.deepEqual(
+      (await store.list()).map((item) => item.id),
+      [`session-${name}`],
+    );
+  }
+});
+
+test("stores isolate sessions and reject missing ids", async () => {
+  for (const { store } of await storeFactories()) {
+    await store.create(metadata("a"));
+    await store.create(metadata("b"));
+    await assert.rejects(store.load("missing"), SessionNotFoundError);
+    assert.deepEqual(
+      (await store.list()).map((item) => item.id).sort(),
+      ["a", "b"],
+    );
+  }
+});
+
+test("memory store can fail exactly the next append", async () => {
+  const store = new MemorySessionStore();
+  await store.create(metadata("failure"));
+  store.failNextAppend(new Error("disk full"));
+  await assert.rejects(
+    store.append("failure", [
+      {
+        type: "commit",
+        sequence: 1,
+        timestamp: "2026-09-28T00:00:01.000Z",
+        operations: [],
+      },
+    ]),
+    /disk full/,
+  );
+  await store.append("failure", [
+    {
+      type: "commit",
+      sequence: 1,
+      timestamp: "2026-09-28T00:00:02.000Z",
+      operations: [],
+    },
+  ]);
+  assert.equal((await store.load("failure")).lastSequence, 1);
+});
+
+test("jsonl store ignores only a truncated final line", async () => {
+  const root = await mkdtemp(join(tmpdir(), "mini-agent-jsonl-"));
+  const store = new JsonlSessionStore(root);
+  await store.create(metadata("truncated"));
+  await store.append("truncated", [
+    {
+      type: "commit",
+      sequence: 1,
+      timestamp: "2026-09-28T00:00:01.000Z",
+      operations: [
+        { type: "message", message: systemMessage("committed-system") },
+      ],
+    },
+  ]);
+  const path = join(root, "sessions", "truncated.jsonl");
+  const content = await readFile(path, "utf8");
+  await writeFile(
+    path,
+    `${content}{"type":"commit","sequence":2,"operations":[`,
+  );
+
+  const snapshot = await store.load("truncated");
+  assert.equal(snapshot.lastSequence, 1);
+  assert.equal(snapshot.messages.length, 1);
+  assert.equal(snapshot.loadDiagnostics[0]?.kind, "truncated_tail");
 });
