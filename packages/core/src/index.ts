@@ -32,4 +32,30 @@ export type {
   SleepFn,
   StreamRetryOptions,
 } from "./retry.ts";
+export {
+  JsonlSessionStore,
+  MemorySessionStore,
+  SessionNotFoundError,
+  toJsonValue,
+} from "./session-store.ts";
+export {
+  createSessionCommitter,
+  openOrCreateSession,
+} from "./session-committer.ts";
+export type {
+  JsonValue,
+  MessageCommit,
+  OpenedSession,
+  PendingEffect,
+  QueueName,
+  QueuedMessageReservation,
+  SessionCommitter,
+  SessionLoadDiagnostic,
+  SessionMetadata,
+  SessionOperation,
+  SessionRecord,
+  SessionRecoveryWarning,
+  SessionSnapshot,
+  SessionStore,
+} from "./session.ts";
 export * from "./types.ts";

@@ -492,7 +492,14 @@ test("double persistence failure emits no terminal message events but still sett
   );
   assert.deepEqual(terminalMessageEvents, []);
   assert.equal(events.some((event) => event.type === "agent_end"), true);
-  // errorMessage reports the original run failure, not the secondary
-  // persistence failure ("disk still full").
   assert.equal(agent.state.errorMessage, "disk full");
+});
+
+test("Session APIs are exported from the package entrypoint", async () => {
+  const core = await import("../src/index.ts");
+  assert.equal(typeof core.MemorySessionStore, "function");
+  assert.equal(typeof core.JsonlSessionStore, "function");
+  assert.equal(typeof core.SessionNotFoundError, "function");
+  assert.equal(typeof core.openOrCreateSession, "function");
+  assert.equal(typeof core.toJsonValue, "function");
 });
