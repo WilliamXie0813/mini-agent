@@ -432,7 +432,7 @@ class ToolEventDispatchError extends Error {
 }
 ```
 
-如果 `onUpdate` 因事件分发失败而 reject，Tool Execute 外层必须重新抛出 `ToolEventDispatchError`，不能把它包装成 `isError: true` Tool Result。
+如果 `onUpdate` 因事件分发失败而 reject，Runtime 必须记录对应的 `ToolEventDispatchError`。即使 Tool 错误地捕获该异常并返回普通结果，Runtime 也必须在 `execute` settle 后重新抛出已记录的分发错误，不能把它包装成 `isError: true` Tool Result。
 
 ## 串行 Finalization
 
