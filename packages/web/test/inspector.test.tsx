@@ -15,7 +15,7 @@ describe("InspectorPanel", () => {
     const state = {
       ...emptyState(),
       queues: {
-        steering: [{ role: "user" as const, content: "排队中的消息", timestamp: 1 }],
+        steering: [{ id: "user-queued", role: "user" as const, content: "排队中的消息", timestamp: 1 }],
         followUp: [],
       },
     };

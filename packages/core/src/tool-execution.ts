@@ -3,6 +3,7 @@ import type {
   AgentEvent,
   BeforeToolCall,
   EventSink,
+  IdGenerator,
   Tool,
   ToolCall,
   ToolExecutionMode,
@@ -20,6 +21,7 @@ export interface ToolExecutionBatchOptions {
   tools: readonly Tool<unknown>[];
   toolExecutionMode: ToolExecutionMode;
   maxConcurrency: number;
+  idGenerator: IdGenerator;
   beforeToolCall?: BeforeToolCall;
   afterToolCall?: AfterToolCall;
   emit: EventSink;
@@ -218,8 +220,12 @@ async function prepareToolCalls(
 }
 
 /** 将内部完成记录转换成下一轮模型可见的 Tool Result Message。 */
-function toMessage(completed: CompletedToolCall): ToolResultMessage {
+function toMessage(
+  completed: CompletedToolCall,
+  idGenerator: IdGenerator,
+): ToolResultMessage {
   return {
+    id: idGenerator(),
     role: "toolResult",
     toolCallId: completed.toolCall.id,
     toolName: completed.toolCall.name,
@@ -579,5 +585,7 @@ export async function executeToolCallBatch(
   }
 
   completed.sort((left, right) => left.index - right.index);
-  return { messages: completed.map(toMessage) };
+  return {
+    messages: completed.map((item) => toMessage(item, options.idGenerator)),
+  };
 }

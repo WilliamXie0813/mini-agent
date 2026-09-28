@@ -13,9 +13,11 @@
  *
  * 关键约束（设计文档明确要求）：Mock LLM 从不执行工具，也从不修改 Agent 状态。
  */
+import { randomUUID } from "node:crypto";
 import type {
   AgentMessage,
   AssistantMessage,
+  IdGenerator,
   ModelStreamEvent,
   StreamFn,
   ToolResultMessage,
@@ -88,8 +90,10 @@ async function* streamText(
   text: string,
   signal: AbortSignal,
   delayMs: number,
+  id: string,
 ): AsyncGenerator<ModelStreamEvent> {
   let message: AssistantMessage = {
+    id,
     role: "assistant",
     content: [{ type: "text", text: "" }],
     stopReason: "stop",
@@ -114,12 +118,21 @@ async function* streamText(
 /**
  * 创建一个 Mock 模型的 StreamFn。
  * delayMs 控制流式速度（demo 里设为 10ms 便于肉眼观察流式效果；测试里为 0 追求速度）。
+ * idGenerator 提供消息 ID：一次 mockStream 调用内所有 assistant 快照共享同一个 ID。
  */
-export function createMockStream(options: { delayMs?: number } = {}): StreamFn {
+export function createMockStream(
+  options: {
+    delayMs?: number;
+    idGenerator?: IdGenerator;
+  } = {},
+): StreamFn {
   const delayMs = options.delayMs ?? 0;
+  const idGenerator = options.idGenerator ?? randomUUID;
 
   return async function* mockStream(messages, signal) {
     signal.throwIfAborted();
+    // 一次流式响应从始至终只有一条 assistant 消息，快照只追加内容、不换身份。
+    const messageId = idGenerator();
     const lastMessage = messages.at(-1);
     const readResult = latestReadResult(messages);
 
@@ -130,6 +143,7 @@ export function createMockStream(options: { delayMs?: number } = {}): StreamFn {
           `工具执行失败：${lastMessage.content}`,
           signal,
           delayMs,
+          messageId,
         );
         return;
       }
@@ -141,6 +155,7 @@ export function createMockStream(options: { delayMs?: number } = {}): StreamFn {
           : "package.json 中没有有效的 name。",
         signal,
         delayMs,
+        messageId,
       );
       return;
     }
@@ -155,6 +170,7 @@ export function createMockStream(options: { delayMs?: number } = {}): StreamFn {
         packageData.name ?? "当前上下文中没有项目名称。",
         signal,
         delayMs,
+        messageId,
       );
       return;
     }
@@ -168,6 +184,7 @@ export function createMockStream(options: { delayMs?: number } = {}): StreamFn {
           : "当前上下文中没有项目版本信息。",
         signal,
         delayMs,
+        messageId,
       );
       return;
     }
@@ -184,6 +201,7 @@ export function createMockStream(options: { delayMs?: number } = {}): StreamFn {
         arguments: { path: "package.json" },
       };
       const startMessage: AssistantMessage = {
+        id: messageId,
         role: "assistant",
         content: [],
         stopReason: "toolUse", // 注意：stopReason 是 toolUse，告诉循环“我还有工具要跑”
@@ -206,6 +224,7 @@ export function createMockStream(options: { delayMs?: number } = {}): StreamFn {
         : "没有可处理的用户消息。",
       signal,
       delayMs,
+      messageId,
     );
   };
 }

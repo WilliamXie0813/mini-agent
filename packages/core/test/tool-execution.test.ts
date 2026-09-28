@@ -63,6 +63,7 @@ async function flushMicrotasks(): Promise<void> {
 function options(overrides: {
   tools?: Tool<unknown>[];
   events?: AgentEvent[];
+  idGenerator?: () => string;
   beforeToolCall?: (
     call: ToolCall,
     parameters: unknown,
@@ -82,12 +83,24 @@ function options(overrides: {
     maxConcurrency: 4,
     beforeToolCall: overrides.beforeToolCall,
     afterToolCall: overrides.afterToolCall,
+    idGenerator: overrides.idGenerator ?? (() => "tool-result-default"),
     signal: overrides.signal ?? new AbortController().signal,
     emit: async (event: AgentEvent) => {
       events.push(event);
     },
   };
 }
+
+test("tool results use the injected id generator", async () => {
+  const batch = await executeToolCallBatch(
+    [toolCall("a")],
+    options({
+      tools: [createTool("a", async () => ({ content: "ok" }))],
+      idGenerator: () => "tool-result-fixed",
+    }),
+  );
+  assert.equal(batch.messages[0]?.id, "tool-result-fixed");
+});
 
 test("rejects empty and duplicate tool call ids before hooks run", async () => {
   let hookCalls = 0;

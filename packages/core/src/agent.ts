@@ -14,6 +14,7 @@
  * 2. 把循环发出的事件流归约（reduce）成 AgentState，并保证“状态先更新，订阅者后收到通知”；
  * 3. 把循环抛出的异常翻译成一条 error/aborted 的 assistant 消息，让失败也走正常事件通道。
  */
+import { randomUUID } from "node:crypto";
 import { runAgentLoop } from "./agent-loop.ts";
 import { defaultSleep } from "./retry.ts";
 import type { RetryPolicy, SleepFn } from "./retry.ts";
@@ -26,6 +27,7 @@ import type {
   AgentState,
   BeforeToolCall,
   FinishTurn,
+  IdGenerator,
   PrepareNextTurn,
   PrepareRequest,
   StreamFn,
@@ -50,6 +52,7 @@ export interface AgentOptions {
   transformContext?: TransformContext;
   retryPolicy?: RetryPolicy;
   sleep?: SleepFn;
+  idGenerator?: IdGenerator;
 }
 
 function normalizeMaxToolConcurrency(value: number | undefined): number {
@@ -115,6 +118,8 @@ export class Agent {
   private readonly stream: StreamFn;
   private readonly retryPolicy?: RetryPolicy;
   private readonly sleep?: SleepFn;
+  /** 消息 ID 来源：注入后可让测试用确定性身份，缺省用 randomUUID。 */
+  private readonly idGenerator: IdGenerator;
   /** 默认保持串行；只有调用者显式开启 parallel 才会尝试并行。 */
   private readonly toolExecutionMode: ToolExecutionMode;
   /** 限制完整 Tool Call 生命周期数量，而不只是 execute() Promise 数量。 */
@@ -165,10 +170,12 @@ export class Agent {
     this.prepareNextTurn = options.prepareNextTurn;
     this.prepareRequest = options.prepareRequest;
     this.transformContext = options.transformContext;
+    this.idGenerator = options.idGenerator ?? randomUUID;
     this.mutableState = {
       // 消息历史以系统提示词开头
       messages: [
         {
+          id: this.idGenerator(),
           role: "system",
           content: options.systemPrompt,
           timestamp: Date.now(),
@@ -286,7 +293,7 @@ export class Agent {
   }
 
   private createUserMessage(content: string): UserMessage {
-    return { role: "user", content, timestamp: Date.now() };
+    return { id: this.idGenerator(), role: "user", content, timestamp: Date.now() };
   }
 
   /** 状态守卫：活动 run 期间的第二次 prompt() / continue() / reset() 直接抛错 */
@@ -312,6 +319,7 @@ export class Agent {
   private createConfig(): AgentLoopConfig {
     return {
       stream: this.stream,
+      idGenerator: this.idGenerator,
       retryPolicy: this.retryPolicy,
       sleep: this.sleep,
       getSteeringMessages: () => this.steeringQueue.drainOne(),
@@ -377,6 +385,7 @@ export class Agent {
     signal: AbortSignal,
   ): Promise<void> {
     const message = {
+      id: this.idGenerator(),
       role: "assistant" as const,
       content: [{ type: "text" as const, text: "" }],
       stopReason: signal.aborted ? ("aborted" as const) : ("error" as const),

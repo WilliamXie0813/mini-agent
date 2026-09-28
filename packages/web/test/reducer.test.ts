@@ -3,6 +3,7 @@ import type { AssistantMessage } from "@mini-agent/core";
 import { emptyState, reduceEvent } from "../src/state/reducer";
 
 const assistantMessage: AssistantMessage = {
+  id: "assistant-1",
   role: "assistant",
   content: [{ type: "text", text: "你好" }],
   stopReason: "stop",
@@ -22,7 +23,7 @@ describe("reduceEvent", () => {
   });
 
   it("ignores message_start/update for non-assistant messages", () => {
-    const user = { role: "user" as const, content: "hi", timestamp: 1 };
+    const user = { id: "user-1", role: "user" as const, content: "hi", timestamp: 1 };
     const state = reduceEvent(emptyState(), {
       type: "message_start",
       message: user,

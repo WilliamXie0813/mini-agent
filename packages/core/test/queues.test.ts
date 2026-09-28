@@ -29,6 +29,7 @@ test("steering queued before prompt is included in the first Turn", async () => 
     stream: async function* (messages) {
       requests.push(messages.slice());
       const message = {
+        id: "assistant-done",
         role: "assistant" as const,
         content: [{ type: "text" as const, text: "done" }],
         stopReason: "stop" as const,

@@ -5,6 +5,7 @@ import { ModelError } from "../src/errors.ts";
 import { createMockStream } from "../src/mock-llm.ts";
 import { createDefaultRetryPolicy } from "../src/retry.ts";
 import { createReadTool } from "../src/tools.ts";
+import { createIdGenerator } from "./helpers.ts";
 import type {
   AgentEvent,
   AgentMessage,
@@ -30,6 +31,7 @@ test("loop completes user to tool to final answer flow", async () => {
   await runAgentLoop(
     [
       {
+        id: "user-package",
         role: "user",
         content: "读取 package.json，并告诉我项目名称。",
         timestamp: 1,
@@ -38,6 +40,7 @@ test("loop completes user to tool to final answer flow", async () => {
     context,
     {
       stream: createMockStream(),
+      idGenerator: createIdGenerator(),
       getSteeringMessages: () => [],
       getFollowUpMessages: () => [],
       hasSteeringMessages: () => false,
@@ -96,6 +99,7 @@ test("beforeToolCall can block execution", async () => {
   await runAgentLoop(
     [
       {
+        id: "user-package",
         role: "user",
         content: "读取 package.json。",
         timestamp: 1,
@@ -104,6 +108,7 @@ test("beforeToolCall can block execution", async () => {
     context,
     {
       stream: createMockStream(),
+      idGenerator: createIdGenerator(),
       getSteeringMessages: () => [],
       getFollowUpMessages: () => [],
       hasSteeringMessages: () => false,
@@ -141,6 +146,7 @@ test("afterToolCall can replace a successful result", async () => {
   await runAgentLoop(
     [
       {
+        id: "user-package",
         role: "user",
         content: "读取 package.json。",
         timestamp: 1,
@@ -149,6 +155,7 @@ test("afterToolCall can replace a successful result", async () => {
     context,
     {
       stream: createMockStream(),
+      idGenerator: createIdGenerator(),
       getSteeringMessages: () => [],
       getFollowUpMessages: () => [],
       hasSteeringMessages: () => false,
@@ -176,6 +183,7 @@ function createSingleToolCallStream(toolCall: ToolCall): StreamFn {
   return async function* (messages) {
     if (messages.at(-1)?.role === "toolResult") {
       const message: AssistantMessage = {
+        id: "assistant-done",
         role: "assistant",
         content: [{ type: "text", text: "Tool result observed." }],
         stopReason: "stop",
@@ -187,6 +195,7 @@ function createSingleToolCallStream(toolCall: ToolCall): StreamFn {
     }
 
     const start: AssistantMessage = {
+      id: "assistant-tool-call",
       role: "assistant",
       content: [],
       stopReason: "toolUse",
@@ -205,10 +214,11 @@ async function runSingleToolCall(
 ): Promise<AgentMessage[]> {
   const context = { messages: [] as AgentMessage[], tools };
   await runAgentLoop(
-    [{ role: "user", content: "run tool", timestamp: 1 }],
+    [{ id: "user-run-tool", role: "user", content: "run tool", timestamp: 1 }],
     context,
     {
       stream: createSingleToolCallStream(toolCall),
+      idGenerator: createIdGenerator(),
       getSteeringMessages: () => [],
       getFollowUpMessages: () => [],
       hasSteeringMessages: () => false,
@@ -239,6 +249,7 @@ function createTwoToolCallStream(): StreamFn {
   return async function* (messages) {
     if (messages.at(-1)?.role === "toolResult") {
       const message: AssistantMessage = {
+        id: "assistant-done",
         role: "assistant",
         content: [{ type: "text", text: "done" }],
         stopReason: "stop",
@@ -254,6 +265,7 @@ function createTwoToolCallStream(): StreamFn {
       { type: "toolCall", id: "b", name: "b", arguments: {} },
     ];
     const start: AssistantMessage = {
+      id: "assistant-tool-calls",
       role: "assistant",
       content: [],
       stopReason: "toolUse",
@@ -298,10 +310,11 @@ test("parallel tools emit completion order but commit model source order", async
   };
 
   const running = runAgentLoop(
-    [{ role: "user", content: "run both", timestamp: 1 }],
+    [{ id: "user-run-both", role: "user", content: "run both", timestamp: 1 }],
     context,
     {
       stream: createTwoToolCallStream(),
+      idGenerator: createIdGenerator(),
       getSteeringMessages: () => [],
       getFollowUpMessages: () => [],
       hasSteeringMessages: () => false,
@@ -437,6 +450,7 @@ test("finishTurn can request exactly one extra context-only Turn", async () => {
   await runAgentLoop(
     [
       {
+        id: "user-normal",
         role: "user",
         content: "普通消息",
         timestamp: 1,
@@ -445,6 +459,7 @@ test("finishTurn can request exactly one extra context-only Turn", async () => {
     context,
     {
       stream: createMockStream(),
+      idGenerator: createIdGenerator(),
       getSteeringMessages: () => [],
       getFollowUpMessages: () => [],
       hasSteeringMessages: () => false,
@@ -473,11 +488,11 @@ test("finishTurn can stop before a queued follow-up", async () => {
     tools: [],
   };
   const followUps: AgentMessage[] = [
-    { role: "user", content: "不应执行", timestamp: 2 },
+    { id: "user-should-not-run", role: "user", content: "不应执行", timestamp: 2 },
   ];
 
   await runAgentLoop(
-    [{ role: "user", content: "普通消息", timestamp: 1 }],
+    [{ id: "user-normal", role: "user", content: "普通消息", timestamp: 1 }],
     context,
     {
       stream: createMockStream(),
@@ -485,6 +500,7 @@ test("finishTurn can stop before a queued follow-up", async () => {
       getFollowUpMessages: () => followUps.splice(0),
       hasSteeringMessages: () => false,
       hasFollowUpMessages: () => followUps.length > 0,
+      idGenerator: createIdGenerator(),
       toolExecutionMode: "sequential",
       maxToolConcurrency: 4,
       finishTurn: async () => ({ action: "end" }),
@@ -508,6 +524,7 @@ test("first Turn prepares and transforms request before streaming", async () => 
     order.push("stream");
     received.push(messages.slice());
     const message: AssistantMessage = {
+      id: "assistant-done",
       role: "assistant",
       content: [{ type: "text", text: "done" }],
       stopReason: "stop",
@@ -517,14 +534,15 @@ test("first Turn prepares and transforms request before streaming", async () => 
     yield { type: "end", message };
   };
   const context = {
-    messages: [{ role: "system", content: "system", timestamp: 1 }] as AgentMessage[],
+    messages: [{ id: "system-1", role: "system", content: "system", timestamp: 1 }] as AgentMessage[],
     tools: [],
   };
   await runAgentLoop(
-    [{ role: "user", content: "original", timestamp: 2 }],
+    [{ id: "user-original", role: "user", content: "original", timestamp: 2 }],
     context,
     {
       stream,
+      idGenerator: createIdGenerator(),
       getSteeringMessages: () => [],
       getFollowUpMessages: () => [],
       hasSteeringMessages: () => false,
@@ -536,7 +554,7 @@ test("first Turn prepares and transforms request before streaming", async () => 
         return {
           messages: [
             ...snapshot.messages,
-            { role: "user", content: "prepared", timestamp: 20 },
+            { id: "user-prepared", role: "user", content: "prepared", timestamp: 20 },
           ],
         };
       },
@@ -573,6 +591,7 @@ test("later Turn starts before prepareNextTurn", async () => {
     streamCount += 1;
     order.push(`stream:${streamCount}`);
     const message: AssistantMessage = {
+      id: "assistant-done",
       role: "assistant",
       content: [{ type: "text", text: "done" }],
       stopReason: "stop",
@@ -582,10 +601,11 @@ test("later Turn starts before prepareNextTurn", async () => {
     yield { type: "end", message };
   };
   await runAgentLoop(
-    [{ role: "user", content: "start", timestamp: 1 }],
+    [{ id: "user-start", role: "user", content: "start", timestamp: 1 }],
     { messages: [], tools: [] },
     {
       stream,
+      idGenerator: createIdGenerator(),
       getSteeringMessages: () => [],
       getFollowUpMessages: () => [],
       hasSteeringMessages: () => false,
@@ -617,10 +637,11 @@ test("CompletedTurn context remains stable after later replacement", async () =>
   const snapshots: Array<readonly AgentMessage[]> = [];
   let turns = 0;
   await runAgentLoop(
-    [{ role: "user", content: "start", timestamp: 1 }],
+    [{ id: "user-start", role: "user", content: "start", timestamp: 1 }],
     { messages: [], tools: [] },
     {
       stream: createMockStream(),
+      idGenerator: createIdGenerator(),
       getSteeringMessages: () => [],
       getFollowUpMessages: () => [],
       hasSteeringMessages: () => false,
@@ -633,7 +654,7 @@ test("CompletedTurn context remains stable after later replacement", async () =>
         return turns === 1 ? { action: "continue" } : undefined;
       },
       prepareNextTurn: async () => ({
-        messages: [{ role: "user", content: "rebuilt", timestamp: 10 }],
+        messages: [{ id: "user-rebuilt", role: "user", content: "rebuilt", timestamp: 10 }],
       }),
     },
     async () => {},
@@ -654,6 +675,7 @@ test("CompletedTurn context remains stable after later replacement", async () =>
 function baseLoopConfig(stream: StreamFn) {
   return {
     stream,
+    idGenerator: createIdGenerator(),
     getSteeringMessages: () => [],
     getFollowUpMessages: () => [],
     hasSteeringMessages: () => false,
@@ -681,6 +703,7 @@ test("Loop retries with one request projection and commits one Assistant message
       throw new ModelError("network", "offline");
     }
     const message: AssistantMessage = {
+      id: "assistant-done",
       role: "assistant",
       content: [{ type: "text", text: "done" }],
       stopReason: "stop",
@@ -691,7 +714,7 @@ test("Loop retries with one request projection and commits one Assistant message
   };
 
   await runAgentLoop(
-    [{ role: "user", content: "hello", timestamp: 1 }],
+    [{ id: "user-hello", role: "user", content: "hello", timestamp: 1 }],
     context,
     {
       ...baseLoopConfig(stream),
@@ -746,12 +769,13 @@ test("Loop rejects incomplete streams even when retry is disabled", async () => 
 
   await assert.rejects(
     runAgentLoop(
-      [{ role: "user", content: "hello", timestamp: 1 }],
+      [{ id: "user-hello", role: "user", content: "hello", timestamp: 1 }],
       context,
       baseLoopConfig(async function* () {
         yield {
           type: "start",
           message: {
+            id: "assistant-incomplete",
             role: "assistant",
             content: [],
             stopReason: "stop",
@@ -788,7 +812,7 @@ test("tool failures stay Tool Results and never call model retry policy", async 
   };
 
   await runAgentLoop(
-    [{ role: "user", content: "run", timestamp: 1 }],
+    [{ id: "user-run", role: "user", content: "run", timestamp: 1 }],
     context,
     {
       ...baseLoopConfig(

@@ -246,6 +246,7 @@ function createCompactionMessage(
     );
   }
   return {
+    id: `compaction-${segmentMessages.at(-1)?.timestamp ?? 0}`,
     role: "system",
     content: [
       "[Earlier context compacted]",

@@ -198,6 +198,7 @@ test("default policy validates options", () => {
 
 function assistant(text: string): AssistantMessage {
   return {
+    id: "assistant-1",
     role: "assistant",
     content: text ? [{ type: "text", text }] : [],
     stopReason: "stop",

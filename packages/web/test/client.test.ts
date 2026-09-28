@@ -68,7 +68,7 @@ describe("AgentClient", () => {
     socket.receive({
       type: "state",
       state: {
-        messages: [{ role: "system", content: "s", timestamp: 1 }],
+        messages: [{ id: "system-1", role: "system", content: "s", timestamp: 1 }],
         isStreaming: false,
         pendingToolCalls: [],
         queues: { steering: [], followUp: [] },

@@ -205,6 +205,7 @@ export async function runAgentLoop(
       tools: context.tools,
       toolExecutionMode: config.toolExecutionMode,
       maxConcurrency: config.maxToolConcurrency,
+      idGenerator: config.idGenerator,
       beforeToolCall: config.beforeToolCall,
       afterToolCall: config.afterToolCall,
       emit,

@@ -28,8 +28,9 @@ describe("ChatPanel", () => {
     const state = {
       ...emptyState(),
       messages: [
-        { role: "user" as const, content: "读取 package.json", timestamp: 1 },
+        { id: "user-package", role: "user" as const, content: "读取 package.json", timestamp: 1 },
         {
+          id: "assistant-tool-call",
           role: "assistant" as const,
           content: [
             {
@@ -43,6 +44,7 @@ describe("ChatPanel", () => {
           timestamp: 2,
         },
         {
+          id: "tool-result-read",
           role: "toolResult" as const,
           toolCallId: "call-1",
           toolName: "read",
@@ -62,6 +64,7 @@ describe("ChatPanel", () => {
 
   it("renders the streaming message with a cursor", () => {
     const streaming: AssistantMessage = {
+      id: "assistant-streaming",
       role: "assistant",
       content: [{ type: "text", text: "正在回答" }],
       stopReason: "stop",
@@ -74,6 +77,7 @@ describe("ChatPanel", () => {
 
   it("keeps the cursor when the last streaming part is a toolCall", () => {
     const streaming: AssistantMessage = {
+      id: "assistant-streaming",
       role: "assistant",
       content: [
         { type: "text", text: "好" },

@@ -45,16 +45,18 @@ function messageCountEstimator(): TokenEstimator {
 
 test("compacting transform replaces old turns and preserves recent turns", async () => {
   const messages: AgentMessage[] = [
-    { role: "system", content: "system", timestamp: 1 },
-    { role: "user", content: "old user", timestamp: 2 },
+    { id: "system-1", role: "system", content: "system", timestamp: 1 },
+    { id: "user-old", role: "user", content: "old user", timestamp: 2 },
     {
+      id: "assistant-old",
       role: "assistant",
       content: [{ type: "text", text: "old answer" }],
       stopReason: "stop",
       timestamp: 3,
     },
-    { role: "user", content: "recent user", timestamp: 4 },
+    { id: "user-recent", role: "user", content: "recent user", timestamp: 4 },
     {
+      id: "assistant-recent",
       role: "assistant",
       content: [{ type: "text", text: "recent answer" }],
       stopReason: "stop",
@@ -79,23 +81,25 @@ test("compacting transform replaces old turns and preserves recent turns", async
 
 test("system messages split compacted segments without moving", async () => {
   const messages: AgentMessage[] = [
-    { role: "system", content: "initial", timestamp: 1 },
-    { role: "user", content: "before", timestamp: 2 },
+    { id: "system-initial", role: "system", content: "initial", timestamp: 1 },
+    { id: "user-before", role: "user", content: "before", timestamp: 2 },
     {
+      id: "assistant-before",
       role: "assistant",
       content: [{ type: "text", text: "answer" }],
       stopReason: "stop",
       timestamp: 3,
     },
-    { role: "system", content: "update", timestamp: 4 },
-    { role: "user", content: "after", timestamp: 5 },
+    { id: "system-update", role: "system", content: "update", timestamp: 4 },
+    { id: "user-after", role: "user", content: "after", timestamp: 5 },
     {
+      id: "assistant-after",
       role: "assistant",
       content: [{ type: "text", text: "answer" }],
       stopReason: "stop",
       timestamp: 6,
     },
-    { role: "user", content: "tail", timestamp: 7 },
+    { id: "user-tail", role: "user", content: "tail", timestamp: 7 },
   ];
   const transform = createDeterministicCompactingTransform({
     maxInputTokens: 5,
@@ -119,8 +123,9 @@ test("system messages split compacted segments without moving", async () => {
 
 test("compaction reports tools and rejects impossible budgets", async () => {
   const messages: AgentMessage[] = [
-    { role: "user", content: "old", timestamp: 1 },
+    { id: "user-old", role: "user", content: "old", timestamp: 1 },
     {
+      id: "assistant-tool",
       role: "assistant",
       content: [
         {
@@ -134,6 +139,7 @@ test("compaction reports tools and rejects impossible budgets", async () => {
       timestamp: 2,
     },
     {
+      id: "tool-result-read",
       role: "toolResult",
       toolCallId: "call",
       toolName: "read",
@@ -141,7 +147,7 @@ test("compaction reports tools and rejects impossible budgets", async () => {
       isError: true,
       timestamp: 3,
     },
-    { role: "user", content: "tail", timestamp: 4 },
+    { id: "user-tail", role: "user", content: "tail", timestamp: 4 },
   ];
   const transform = createDeterministicCompactingTransform({
     maxInputTokens: 2,
@@ -170,8 +176,8 @@ test("compaction reports tools and rejects impossible budgets", async () => {
 test("heuristic estimator counts natural text and message overhead", () => {
   const estimator = createHeuristicTokenEstimator();
   const messages: AgentMessage[] = [
-    { role: "system", content: "你好ab", timestamp: 1 },
-    { role: "user", content: "abcdefgh", timestamp: 2 },
+    { id: "system-1", role: "system", content: "你好ab", timestamp: 1 },
+    { id: "user-1", role: "user", content: "abcdefgh", timestamp: 2 },
   ];
   assert.equal(estimator.estimate(messages), 13);
 });
@@ -180,6 +186,7 @@ test("heuristic estimator serializes tool data with sorted keys", () => {
   const estimator = createHeuristicTokenEstimator();
   const createMessages = (argumentsValue: unknown): AgentMessage[] => [
     {
+      id: "assistant-1",
       role: "assistant",
       content: [
         {
@@ -205,6 +212,7 @@ test("heuristic estimator rejects circular values and bigint", () => {
   circular.self = circular;
   const createMessages = (argumentsValue: unknown): AgentMessage[] => [
     {
+      id: "assistant-1",
       role: "assistant",
       content: [
         {

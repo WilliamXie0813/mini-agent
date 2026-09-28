@@ -18,6 +18,7 @@ export type StopReason = "stop" | "toolUse" | "error" | "aborted";
 
 /** 系统提示词，始终位于消息历史开头 */
 export interface SystemMessage {
+  id: string;
   role: "system";
   content: string;
   timestamp: number;
@@ -25,6 +26,7 @@ export interface SystemMessage {
 
 /** 用户输入（包括正常 prompt、steer 插队消息、followUp 追加消息） */
 export interface UserMessage {
+  id: string;
   role: "user";
   content: string;
   timestamp: number;
@@ -50,6 +52,7 @@ export interface ToolCall {
  * "error" / "aborted" 时 errorMessage 携带原因。
  */
 export interface AssistantMessage {
+  id: string;
   role: "assistant";
   content: Array<TextContent | ToolCall>;
   stopReason: StopReason;
@@ -59,6 +62,7 @@ export interface AssistantMessage {
 
 /** 工具执行完毕后的结果消息，通过 toolCallId 与 assistant 的 ToolCall 配对 */
 export interface ToolResultMessage {
+  id: string;
   role: "toolResult";
   toolCallId: string;
   toolName: string;
@@ -67,6 +71,9 @@ export interface ToolResultMessage {
   isError: boolean;
   timestamp: number;
 }
+
+/** 消息 ID 生成器：Agent / Mock 模型 / 工具执行器共用的可注入身份来源 */
+export type IdGenerator = () => string;
 
 /** 消息历史的可辨识联合：用 role 字段区分四种消息 */
 export type AgentMessage =
@@ -325,6 +332,7 @@ export type FinishTurn = (
  */
 export interface AgentLoopConfig {
   stream: StreamFn;
+  idGenerator: IdGenerator;
   retryPolicy?: RetryPolicy;
   sleep?: SleepFn;
   getSteeringMessages(): AgentMessage[];
