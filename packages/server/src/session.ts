@@ -1,27 +1,57 @@
-import { Agent, createMockStream, createReadTool } from "@mini-agent/core";
+import {
+  Agent,
+  createMockStream,
+  createReadTool,
+  type AgentOptions,
+} from "@mini-agent/core";
+import type { SessionSnapshot } from "@mini-agent/core";
 import type { WebSocket, WebSocketServer } from "ws";
 import { encodeMessage, parseCommand, serializeState } from "./protocol.ts";
 import type { ClientCommand, ServerMessage } from "./protocol.ts";
+import type { SessionManager } from "./session-manager.ts";
 
-export function createAgent(): Agent {
+export function createAgent(
+  persistence: Pick<
+    AgentOptions,
+    "initialSession" | "sessionCommitter" | "idGenerator"
+  > = {},
+): Agent {
   return new Agent({
     systemPrompt: "You are a deterministic teaching Agent.",
-    stream: createMockStream({ delayMs: 30 }),
+    stream: createMockStream({
+      delayMs: 30,
+      idGenerator: persistence.idGenerator,
+    }),
     tools: [
       createReadTool({
         "package.json":
           "{\"name\":\"mock-agent-demo\",\"version\":\"1.0.0\"}",
       }),
     ],
+    ...persistence,
   });
+}
+
+/** 只操作 Agent 本体的命令；会话管理命令由 SessionSocketServer 处理。 */
+export type AgentCommand = Exclude<
+  ClientCommand,
+  { type: "open_session" } | { type: "create_session" } | { type: "list_sessions" }
+>;
+
+function assertNever(value: never): never {
+  throw new Error(`Unhandled command variant: ${JSON.stringify(value)}`);
 }
 
 export class AgentSession {
   private readonly clients = new Set<WebSocket>();
   private readonly agent: Agent;
   private readonly unsubscribe: () => void;
+  readonly sessionId: string;
+  private readonly snapshot: SessionSnapshot;
 
-  constructor(agent: Agent) {
+  constructor(sessionId: string, agent: Agent, snapshot: SessionSnapshot) {
+    this.sessionId = sessionId;
+    this.snapshot = snapshot;
     this.agent = agent;
     this.unsubscribe = this.agent.subscribe((event) => {
       this.broadcast({ type: "event", event });
@@ -33,47 +63,28 @@ export class AgentSession {
     });
   }
 
-  attach(wss: WebSocketServer): void {
-    wss.on("connection", (socket) => {
-      this.clients.add(socket);
-      this.sendState(socket);
-      socket.on("message", (data) => {
-        this.handleMessage(socket, data.toString());
-      });
-      socket.on("close", () => {
-        this.clients.delete(socket);
-      });
-      socket.on("error", () => {});
-    });
+  addClient(socket: WebSocket): void {
+    this.clients.add(socket);
   }
 
-  dispose(): void {
-    this.unsubscribe();
-    this.clients.clear();
+  removeClient(socket: WebSocket): void {
+    this.clients.delete(socket);
   }
 
-  private handleMessage(socket: WebSocket, raw: string): void {
-    const result = parseCommand(raw);
-    if (!result.ok) {
+  sendInitialState(socket: WebSocket): void {
+    this.sendState(socket);
+    if (this.snapshot.recoveryWarnings.length > 0) {
       this.send(socket, {
-        type: result.kind === "session" ? "session_error" : "error",
-        message: result.message,
+        type: "event",
+        event: {
+          type: "session_recovery_warning",
+          warnings: this.snapshot.recoveryWarnings,
+        },
       });
-      return;
     }
-    void this.execute(result.command)
-      .catch((error: unknown) => {
-        this.send(socket, {
-          type: "error",
-          message: error instanceof Error ? error.message : String(error),
-        });
-      })
-      .finally(() => {
-        this.broadcastState();
-      });
   }
 
-  private async execute(command: ClientCommand): Promise<void> {
+  async execute(command: AgentCommand): Promise<void> {
     switch (command.type) {
       case "prompt":
         await this.agent.prompt(command.content);
@@ -91,14 +102,21 @@ export class AgentSession {
         await this.agent.reset();
         this.broadcast({ type: "reset" });
         return;
+      default:
+        assertNever(command);
     }
   }
 
-  private broadcastState(): void {
+  broadcastState(): void {
     this.broadcast({
       type: "state",
       state: serializeState(this.agent.state, this.agent.queuedMessages),
     });
+  }
+
+  dispose(): void {
+    this.unsubscribe();
+    this.clients.clear();
   }
 
   private sendState(socket: WebSocket): void {
@@ -119,4 +137,144 @@ export class AgentSession {
       socket.send(encodeMessage(message));
     }
   }
+}
+
+type SessionCommand = Extract<
+  ClientCommand,
+  { type: "open_session" } | { type: "create_session" }
+>;
+
+export class SessionSocketServer {
+  private readonly bindings = new Map<WebSocket, AgentSession>();
+  private readonly manager: SessionManager;
+
+  constructor(manager: SessionManager) {
+    this.manager = manager;
+  }
+
+  attach(wss: WebSocketServer): void {
+    wss.on("connection", (socket) => {
+      void this.handleConnection(socket);
+    });
+  }
+
+  dispose(): void {
+    this.bindings.clear();
+  }
+
+  private async handleConnection(socket: WebSocket): Promise<void> {
+    let session: AgentSession;
+    try {
+      session = await this.manager.getOrOpen("default");
+    } catch (error) {
+      this.send(socket, {
+        type: "session_error",
+        message: error instanceof Error ? error.message : String(error),
+      });
+      return;
+    }
+    session.addClient(socket);
+    this.bindings.set(socket, session);
+    session.sendInitialState(socket);
+    socket.on("message", (data) => {
+      this.handleMessage(socket, data.toString());
+    });
+    socket.on("close", () => {
+      this.bindings.get(socket)?.removeClient(socket);
+      this.bindings.delete(socket);
+    });
+    socket.on("error", () => {});
+  }
+
+  private handleMessage(socket: WebSocket, raw: string): void {
+    const result = parseCommand(raw);
+    if (!result.ok) {
+      this.send(socket, {
+        type: result.kind === "session" ? "session_error" : "error",
+        message: result.message,
+      });
+      return;
+    }
+    const command = result.command;
+    void this.dispatch(socket, command)
+      .catch((error: unknown) => {
+        this.send(socket, {
+          type: isSessionCommand(command) ? "session_error" : "error",
+          message: error instanceof Error ? error.message : String(error),
+        });
+      })
+      .finally(() => {
+        this.bindings.get(socket)?.broadcastState();
+      });
+  }
+
+  private async dispatch(
+    socket: WebSocket,
+    command: ClientCommand,
+  ): Promise<void> {
+    switch (command.type) {
+      case "open_session":
+      case "create_session":
+        await this.switchSession(socket, command);
+        return;
+      case "list_sessions":
+        this.send(socket, {
+          type: "session_list",
+          sessions: await this.manager.list(),
+        });
+        return;
+      case "prompt":
+      case "steer":
+      case "followUp":
+      case "abort":
+      case "reset": {
+        const session = this.bindings.get(socket);
+        if (!session) {
+          throw new Error("No session bound to this connection");
+        }
+        await session.execute(command);
+        return;
+      }
+      default:
+        assertNever(command);
+    }
+  }
+
+  private async switchSession(
+    socket: WebSocket,
+    command: SessionCommand,
+  ): Promise<void> {
+    const sessionId =
+      command.type === "create_session"
+        ? (command.sessionId ?? this.manager.createId())
+        : command.sessionId;
+    const session = await this.manager.getOrOpen(sessionId);
+    const previous = this.bindings.get(socket);
+    if (previous && previous !== session) {
+      previous.removeClient(socket);
+    }
+    session.addClient(socket);
+    this.bindings.set(socket, session);
+    this.send(socket, { type: "session_opened", sessionId });
+    session.sendInitialState(socket);
+  }
+
+  private send(socket: WebSocket, message: ServerMessage): void {
+    if (socket.readyState === socket.OPEN) {
+      socket.send(encodeMessage(message));
+    }
+  }
+}
+
+function isSessionCommand(
+  command: ClientCommand,
+): command is Extract<
+  ClientCommand,
+  { type: "open_session" } | { type: "create_session" } | { type: "list_sessions" }
+> {
+  return (
+    command.type === "open_session" ||
+    command.type === "create_session" ||
+    command.type === "list_sessions"
+  );
 }

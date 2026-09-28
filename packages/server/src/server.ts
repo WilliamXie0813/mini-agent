@@ -3,7 +3,9 @@ import { createServer } from "node:http";
 import { extname, join, normalize, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { WebSocketServer } from "ws";
-import { AgentSession, createAgent } from "./session.ts";
+import { JsonlSessionStore } from "@mini-agent/core";
+import { SessionManager } from "./session-manager.ts";
+import { SessionSocketServer, createAgent } from "./session.ts";
 
 const PORT = Number(process.env.PORT ?? 3001);
 const HOST = process.env.HOST ?? "127.0.0.1";
@@ -58,12 +60,17 @@ server.on("error", (error: NodeJS.ErrnoException) => {
 });
 
 const wss = new WebSocketServer({ server, path: "/ws" });
-const session = new AgentSession(createAgent());
-session.attach(wss);
+const manager = new SessionManager(
+  new JsonlSessionStore(fileURLToPath(new URL("./data", import.meta.url))),
+  (options) => createAgent(options),
+);
+const router = new SessionSocketServer(manager);
+router.attach(wss);
 
 function shutdown(): void {
   console.log("Shutting down…");
-  session.dispose();
+  router.dispose();
+  manager.dispose();
   for (const client of wss.clients) {
     client.terminate();
   }
