@@ -292,3 +292,108 @@ test("stores list sessions ordered by updatedAt descending", async () => {
     );
   }
 });
+
+test("cancelled effects are diagnostic but not unknown", () => {
+  const snapshot = replaySessionRecords(
+    [
+      {
+        type: "session",
+        version: 1,
+        metadata: metadata("effects"),
+      },
+      {
+        type: "commit",
+        sequence: 1,
+        timestamp: "2026-09-28T00:00:01.000Z",
+        operations: [
+          {
+            type: "effect_started",
+            effect: {
+              toolCallId: "call-cancelled",
+              toolName: "write",
+              arguments: {},
+              replay: "never",
+            },
+          },
+        ],
+      },
+      {
+        type: "commit",
+        sequence: 2,
+        timestamp: "2026-09-28T00:00:02.000Z",
+        operations: [
+          { type: "effect_cancelled", toolCallId: "call-cancelled" },
+        ],
+      },
+    ],
+    [],
+  );
+  assert.deepEqual(snapshot.pendingEffects, []);
+  assert.equal(snapshot.cancelledEffects.length, 1);
+  assert.deepEqual(
+    snapshot.recoveryWarnings.map((warning) => warning.kind),
+    ["cancelled"],
+  );
+});
+
+test("reset clears queues while cancelled effects stay diagnostic", () => {
+  const snapshot = replaySessionRecords(
+    [
+      {
+        type: "session",
+        version: 1,
+        metadata: metadata("reset-effects"),
+      },
+      {
+        type: "commit",
+        sequence: 1,
+        timestamp: "2026-09-28T00:00:01.000Z",
+        operations: [
+          {
+            type: "effect_started",
+            effect: {
+              toolCallId: "call-cancelled",
+              toolName: "write",
+              arguments: {},
+              replay: "never",
+            },
+          },
+        ],
+      },
+      {
+        type: "commit",
+        sequence: 2,
+        timestamp: "2026-09-28T00:00:02.000Z",
+        operations: [
+          { type: "effect_cancelled", toolCallId: "call-cancelled" },
+        ],
+      },
+      {
+        type: "commit",
+        sequence: 3,
+        timestamp: "2026-09-28T00:00:03.000Z",
+        operations: [
+          {
+            type: "queue_enqueued",
+            queue: "steering",
+            message: userMessage("queued-reset", "queued"),
+          },
+        ],
+      },
+      {
+        type: "commit",
+        sequence: 4,
+        timestamp: "2026-09-28T00:00:04.000Z",
+        operations: [{ type: "reset", systemMessage: systemMessage("system-after-reset") }],
+      },
+    ],
+    [],
+  );
+  assert.deepEqual(
+    snapshot.messages.map((message) => message.id),
+    ["system-after-reset"],
+  );
+  assert.deepEqual(snapshot.steeringQueue, []);
+  assert.equal(snapshot.cancelledEffects[0]?.toolCallId, "call-cancelled");
+  assert.equal(snapshot.recoveryWarnings[0]?.kind, "cancelled");
+});

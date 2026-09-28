@@ -259,6 +259,7 @@ export async function runAgentLoop(
       toolExecutionMode: config.toolExecutionMode,
       maxConcurrency: config.maxToolConcurrency,
       idGenerator: config.idGenerator,
+      sessionCommitter: config.sessionCommitter,
       beforeToolCall: config.beforeToolCall,
       afterToolCall: config.afterToolCall,
       emit,
@@ -266,10 +267,13 @@ export async function runAgentLoop(
     });
     const toolResults: ToolResultMessage[] = batch.messages;
     // Tool Result 作为一个连续提交区间写入历史，队列消息只能在 Turn 边界进入。
-    // 每条先落盘再发出；落盘成功后才终结对应的 effect 记录。
+    // 每条先落盘再发出；只有真正开始了副作用的调用才允许终结 effect 记录，
+    // 避免 unknown/invalid/blocked 的 immediate 结果产生无匹配的 effect_finished。
     for (const message of toolResults) {
       await commitMessages([message], [], context, config, emit);
-      await config.sessionCommitter?.finishEffect(message.toolCallId);
+      if (batch.startedEffectIds.includes(message.toolCallId)) {
+        await config.sessionCommitter?.finishEffect(message.toolCallId);
+      }
     }
 
     completedTurn = {

@@ -10,6 +10,8 @@ import type {
   ToolExecutionResult,
   ToolResultMessage,
 } from "./types.ts";
+import type { SessionCommitter } from "./session.ts";
+import { toJsonValue } from "./session-store.ts";
 
 /**
  * 执行一个 Tool Call 批次所需的运行时依赖。
@@ -24,12 +26,16 @@ export interface ToolExecutionBatchOptions {
   idGenerator: IdGenerator;
   beforeToolCall?: BeforeToolCall;
   afterToolCall?: AfterToolCall;
+  /** 持久化入口（可选）：ready 调用的 effect intent 在任何副作用之前落盘。 */
+  sessionCommitter?: SessionCommitter;
   emit: EventSink;
   signal: AbortSignal;
 }
 
 export interface ToolExecutionBatch {
   messages: ToolResultMessage[];
+  /** 本批次中真正开始了外部副作用（已持久化 effect_started）的调用 ID。 */
+  startedEffectIds: string[];
 }
 
 /**
@@ -180,6 +186,10 @@ async function prepareToolCalls(
       continue;
     }
 
+    // ready 调用的 effect intent 依赖可持久化的参数；任何已注册工具的
+    // 非 JSON 参数都必须在执行任何副作用之前让整个批次失败。
+    toJsonValue(toolCall.arguments);
+
     const validation = tool.validate(toolCall.arguments);
     if (!validation.ok) {
       prepared.push({
@@ -280,14 +290,24 @@ async function executeReady(
   finalization: SerialQueue,
   markStarted: MarkStarted,
   markTerminal: MarkTerminal,
+  effectStarted: Set<string>,
 ): Promise<CompletedToolCall> {
+  // Effect intent 必须先于任何外部副作用落盘：只有持久化成功后 execute
+  // 才被允许运行，恢复时才能区分“未开始”与“结果未知”。
+  await options.sessionCommitter?.startEffect({
+    toolCallId: prepared.toolCall.id,
+    toolName: prepared.toolCall.name,
+    arguments: toJsonValue(prepared.toolCall.arguments),
+    replay: prepared.tool.replay ?? "never",
+  });
+  effectStarted.add(prepared.toolCall.id);
+  markStarted(prepared.toolCall);
   await events.emit({
     type: "tool_execution_start",
     toolCallId: prepared.toolCall.id,
     toolName: prepared.toolCall.name,
     argumentsValue: prepared.toolCall.arguments,
   });
-  markStarted(prepared.toolCall);
   options.signal.throwIfAborted();
 
   let result: ToolExecutionResult;
@@ -371,6 +391,7 @@ async function executeSequential(
   finalization: SerialQueue,
   markStarted: MarkStarted,
   markTerminal: MarkTerminal,
+  effectStarted: Set<string>,
 ): Promise<CompletedToolCall[]> {
   const completed: CompletedToolCall[] = [];
   for (const prepared of preparedCalls) {
@@ -384,6 +405,7 @@ async function executeSequential(
             finalization,
             markStarted,
             markTerminal,
+            effectStarted,
           )
         : await executeImmediate(
             prepared,
@@ -431,6 +453,7 @@ async function executeParallel(
   finalization: SerialQueue,
   markStarted: MarkStarted,
   markTerminal: MarkTerminal,
+  effectStarted: Set<string>,
 ): Promise<CompletedToolCall[]> {
   const completed: CompletedToolCall[] = [];
   const activeReady = new Set<Promise<void>>();
@@ -497,6 +520,7 @@ async function executeParallel(
         finalization,
         markStarted,
         markTerminal,
+        effectStarted,
       ),
       true,
     );
@@ -512,23 +536,30 @@ async function executeParallel(
 /**
  * 为已经 start、但尚未 end 的调用补发取消终止事件。
  * EventSink 自身失败时无法可靠通知外部消费者，只能由 Agent finally
- * 清理内部 pending 状态，所以这里直接停止继续分发。
+ * 清理内部 pending 状态，所以事件分发直接跳过；但 effect 的取消记录
+ * 仍必须持久化——恢复时“已取消”远比“结果未知”更有用。
  */
 async function emitCancelledForOpenCalls(
   started: ReadonlyMap<string, ToolCall>,
   terminal: ReadonlySet<string>,
   reason: "aborted" | "control_error",
   events: ToolEventDispatcher,
+  sessionCommitter: SessionCommitter | undefined,
+  effectStarted: ReadonlySet<string>,
 ): Promise<void> {
-  if (events.failed) return;
   for (const toolCall of started.values()) {
     if (terminal.has(toolCall.id)) continue;
-    await events.emit({
-      type: "tool_execution_cancelled",
-      toolCallId: toolCall.id,
-      toolName: toolCall.name,
-      reason,
-    });
+    if (effectStarted.has(toolCall.id)) {
+      await sessionCommitter?.cancelEffect(toolCall.id);
+    }
+    if (!events.failed) {
+      await events.emit({
+        type: "tool_execution_cancelled",
+        toolCallId: toolCall.id,
+        toolName: toolCall.name,
+        reason,
+      });
+    }
   }
 }
 
@@ -540,13 +571,17 @@ export async function executeToolCallBatch(
   toolCalls: readonly ToolCall[],
   options: ToolExecutionBatchOptions,
 ): Promise<ToolExecutionBatch> {
-  if (toolCalls.length === 0) return { messages: [] };
+  if (toolCalls.length === 0) return { messages: [], startedEffectIds: [] };
 
   const prepared = await prepareToolCalls(toolCalls, options);
   const events = new ToolEventDispatcher(options.emit);
   const finalization = new SerialQueue();
   const started = new Map<string, ToolCall>();
   const terminal = new Set<string>();
+  // effectStarted 只记录真正持久化了 effect_started 的 ready 调用：
+  // 它与事件生命周期的 started map 分离，避免 immediate 调用或
+  // 事件失败污染恢复语义。
+  const effectStarted = new Set<string>();
   const markStarted = (toolCall: ToolCall): void => {
     started.set(toolCall.id, toolCall);
   };
@@ -564,6 +599,7 @@ export async function executeToolCallBatch(
           finalization,
           markStarted,
           markTerminal,
+          effectStarted,
         )
       : await executeSequential(
           prepared,
@@ -572,11 +608,19 @@ export async function executeToolCallBatch(
           finalization,
           markStarted,
           markTerminal,
+          effectStarted,
         );
   } catch (error) {
     const reason = options.signal.aborted ? "aborted" : "control_error";
     try {
-      await emitCancelledForOpenCalls(started, terminal, reason, events);
+      await emitCancelledForOpenCalls(
+        started,
+        terminal,
+        reason,
+        events,
+        options.sessionCommitter,
+        effectStarted,
+      );
     } catch {
       // Preserve the original control error or abort reason.
     }
@@ -587,5 +631,6 @@ export async function executeToolCallBatch(
   completed.sort((left, right) => left.index - right.index);
   return {
     messages: completed.map((item) => toMessage(item, options.idGenerator)),
+    startedEffectIds: [...effectStarted],
   };
 }

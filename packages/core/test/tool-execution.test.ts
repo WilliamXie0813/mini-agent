@@ -586,3 +586,65 @@ test("afterToolCall failure cancels other started calls", async () => {
     true,
   );
 });
+
+test("effect intent is committed before tool_execution_start and execute", async () => {
+  const order: string[] = [];
+  const tool = createTool("write", async () => {
+    order.push("execute");
+    return { content: "ok" };
+  });
+  tool.replay = "never";
+  await executeToolCallBatch(
+    [toolCall("write")],
+    {
+      ...options({ tools: [tool] }),
+      sessionCommitter: {
+        commitMessages: async () => {},
+        enqueue: async () => {},
+        startEffect: async () => {
+          order.push("effect_started");
+        },
+        finishEffect: async () => {},
+        cancelEffect: async () => {},
+        reset: async () => {},
+      },
+      emit: async (event) => {
+        if (event.type === "tool_execution_start") order.push("event_start");
+      },
+    },
+  );
+  assert.deepEqual(order, ["effect_started", "event_start", "execute"]);
+});
+
+test("non-JSON arguments fail before tool execution", async () => {
+  let executed = false;
+  const tool = createTool("write", async () => {
+    executed = true;
+    return { content: "ok" };
+  });
+  await assert.rejects(
+    executeToolCallBatch(
+      [
+        {
+          type: "toolCall",
+          id: "write",
+          name: "write",
+          arguments: { value: 1n },
+        },
+      ],
+      {
+        ...options({ tools: [tool] }),
+        sessionCommitter: {
+          commitMessages: async () => {},
+          enqueue: async () => {},
+          startEffect: async () => {},
+          finishEffect: async () => {},
+          cancelEffect: async () => {},
+          reset: async () => {},
+        },
+      },
+    ),
+    /not JSON serializable/,
+  );
+  assert.equal(executed, false);
+});
