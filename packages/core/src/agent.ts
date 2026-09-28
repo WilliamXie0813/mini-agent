@@ -60,7 +60,12 @@ export interface AgentOptions {
   retryPolicy?: RetryPolicy;
   sleep?: SleepFn;
   idGenerator?: IdGenerator;
-  /** 恢复用的快照：与 sessionCommitter 必须同时提供（要么都配，要么都不配）。 */
+  /**
+   * 恢复用的快照：与 sessionCommitter 必须同时提供（要么都配，要么都不配）。
+   * 约束：同一 session id 同时只允许一个 live Agent；committer 必须属于
+   * initialSession.metadata.id。若 Agent 存活期间 store 中的 session 被删除，
+   * steer/reset 会以 SessionNotFoundError 拒绝，内存状态保持一致。
+   */
   initialSession?: SessionSnapshot;
   /** 持久化提交入口：steer/followUp/reset 会先落盘再改内存。 */
   sessionCommitter?: SessionCommitter;
@@ -164,6 +169,11 @@ export class Agent {
   private readonly transformContext?: TransformContext;
   /** 有值表示正在跑；所有会启动 run 的入口都先用 assertIdle 检查它 */
   private activeRun?: ActiveRun;
+  /**
+   * 有值表示 durable reset 正在等待提交完成。它与 activeRun 一样阻塞
+   * prompt/continue/reset；区别是没有 AbortController——abort() 对它无效。
+   */
+  private pendingReset?: Promise<void>;
   /**
    * 内部可变状态。getter state 直接暴露它（类型上收窄为只读的 AgentState），
    * 事件到达时在 processEvent 里就地更新。
@@ -269,14 +279,15 @@ export class Agent {
     this.followUpQueue.enqueue(message);
   }
 
-  /** 中止当前 run：信号同时传给模型流和工具；无活动 run 时是空操作 */
+  /** 中止当前 run：信号同时传给模型流和工具；无活动 run 时是空操作。
+   *  pending 的 reset 没有可中止的 run，abort() 对它同样是空操作。 */
   abort(): void {
     this.activeRun?.controller.abort(new Error("Agent run aborted"));
   }
 
-  /** 等待当前 run 结束；没有在跑的 run 时立即 resolve */
+  /** 等待当前 run 结束；没有在跑的 run 时立即 resolve（pending 的 reset 也会阻塞它） */
   waitForIdle(): Promise<void> {
-    return this.activeRun?.settled ?? Promise.resolve();
+    return this.activeRun?.settled ?? this.pendingReset ?? Promise.resolve();
   }
 
   /** 启动一个新 run，输入是一条新的用户消息 */
@@ -322,9 +333,23 @@ export class Agent {
   /**
    * 清空历史与队列，回到只剩系统提示词的初始状态（要求当前空闲）。
    * 配置了 sessionCommitter 时先落盘 reset 记录，append 失败则内存保持不变。
+   *
+   * 互斥：提交窗口从首个 await 之前就开始占用 Agent——fire-and-forget 调用方
+   * （如 server 的命令分发）在 reset 未落定时跟进 prompt/continue/reset，
+   * 会拿到 "Agent is already processing"，而不会拿到 reset 前的历史切片。
    */
   async reset(): Promise<void> {
     this.assertIdle();
+    this.pendingReset = this.performReset();
+    try {
+      await this.pendingReset;
+    } finally {
+      this.pendingReset = undefined;
+    }
+  }
+
+  /** reset 的执行体；与并发入口的互斥由外层 pendingReset 负责。 */
+  private async performReset(): Promise<void> {
     const existingSystem = this.mutableState.messages.find(
       (message): message is SystemMessage => message.role === "system",
     );
@@ -347,9 +372,9 @@ export class Agent {
     return { id: this.idGenerator(), role: "user", content, timestamp: Date.now() };
   }
 
-  /** 状态守卫：活动 run 期间的第二次 prompt() / continue() / reset() 直接抛错 */
+  /** 状态守卫：活动 run 或 pending reset 期间的第二次 prompt() / continue() / reset() 直接抛错 */
   private assertIdle(): void {
-    if (this.activeRun) {
+    if (this.activeRun || this.pendingReset) {
       throw new Error("Agent is already processing");
     }
   }

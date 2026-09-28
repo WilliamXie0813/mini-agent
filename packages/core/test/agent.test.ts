@@ -131,6 +131,50 @@ test("Agent rejects a second prompt while active", async () => {
   await running;
 });
 
+test("reset rejects a pipelined prompt until the durable reset settles", async () => {
+  let releaseReset!: () => void;
+  const resetGate = new Promise<void>((resolve) => {
+    releaseReset = resolve;
+  });
+  const agent = createAgentWithExecutionOptions({
+    idGenerator: () => "id-reset-guard",
+    initialSession: {
+      metadata: { id: "reset-guard", createdAt: "", updatedAt: "" },
+      messages: [
+        { id: "system-1", role: "system", content: "test", timestamp: 1 },
+      ],
+      steeringQueue: [],
+      followUpQueue: [],
+      pendingEffects: [],
+      cancelledEffects: [],
+      recoveryWarnings: [],
+      loadDiagnostics: [],
+      lastSequence: 0,
+    },
+    sessionCommitter: {
+      commitMessages: async () => {},
+      enqueue: async () => {},
+      startEffect: async () => {},
+      finishEffect: async () => {},
+      cancelEffect: async () => {},
+      reset: async () => {
+        await resetGate;
+      },
+    },
+  });
+
+  // Fire-and-forget 调度（如 server 的命令分发）可能在 reset 提交窗口内
+  // 立即跟进一个 prompt；该 prompt 必须等到 reset 落定后才能启动。
+  const resetPromise = agent.reset();
+  await assert.rejects(agent.prompt("hi"), /Agent is already processing/);
+  await assert.rejects(agent.reset(), /Agent is already processing/);
+
+  releaseReset();
+  await resetPromise;
+  await agent.prompt("hi");
+  assert.equal(agent.state.messages.at(-1)?.role, "assistant");
+});
+
 test("steer is delivered at the next Turn boundary", async () => {
   const agent = createAgent({ delayMs: 1 });
   let steered = false;

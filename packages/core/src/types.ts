@@ -227,7 +227,10 @@ export type AgentEvent =
       toolResults: ToolResultMessage[];
     }
   | {
-      /** 观察性事件：恢复 session 时产生的诊断警告，仅透传，不改变状态。 */
+      /**
+       * 观察性事件：恢复 session 时产生的诊断警告，仅透传，不改变状态。
+       * Agent/Loop 永远不会发出它；由 server 根据 SessionSnapshot.recoveryWarnings 合成。
+       */
       type: "session_recovery_warning";
       warnings: readonly SessionRecoveryWarning[];
     }
