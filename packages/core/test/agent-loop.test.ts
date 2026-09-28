@@ -334,3 +334,64 @@ test("finishTurn can stop before a queued follow-up", async () => {
     false,
   );
 });
+
+test("first Turn prepares and transforms request before streaming", async () => {
+  const order: string[] = [];
+  const received: AgentMessage[][] = [];
+  const stream: StreamFn = async function* (messages) {
+    order.push("stream");
+    received.push(messages.slice());
+    const message: AssistantMessage = {
+      role: "assistant",
+      content: [{ type: "text", text: "done" }],
+      stopReason: "stop",
+      timestamp: 3,
+    };
+    yield { type: "start", message };
+    yield { type: "end", message };
+  };
+  const context = {
+    messages: [{ role: "system", content: "system", timestamp: 1 }] as AgentMessage[],
+    tools: [],
+  };
+  await runAgentLoop(
+    [{ role: "user", content: "original", timestamp: 2 }],
+    context,
+    {
+      stream,
+      getSteeringMessages: () => [],
+      getFollowUpMessages: () => [],
+      prepareRequest: async (snapshot) => {
+        order.push("prepareRequest");
+        return {
+          messages: [
+            ...snapshot.messages,
+            { role: "user", content: "prepared", timestamp: 20 },
+          ],
+        };
+      },
+      transformContext: async (messages) => {
+        order.push("transformContext");
+        return messages.filter(
+          (message) =>
+            message.role !== "user" || message.content !== "original",
+        );
+      },
+    },
+    async () => {},
+    new AbortController().signal,
+  );
+  assert.deepEqual(order, ["prepareRequest", "transformContext", "stream"]);
+  assert.equal(
+    received[0]?.some(
+      (message) => message.role === "user" && message.content === "original",
+    ),
+    false,
+  );
+  assert.equal(
+    context.messages.some(
+      (message) => message.role === "user" && message.content === "original",
+    ),
+    true,
+  );
+});

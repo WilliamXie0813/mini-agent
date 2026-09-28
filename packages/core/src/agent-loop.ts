@@ -14,6 +14,7 @@
  */
 import type {
   AgentContext,
+  AgentContextSnapshot,
   AgentEvent,
   AgentLoopConfig,
   AgentMessage,
@@ -24,6 +25,22 @@ import type {
   ToolExecutionResult,
   ToolResultMessage,
 } from "./types.ts";
+
+function snapshotContext(context: AgentContext): AgentContextSnapshot {
+  return {
+    messages: context.messages.slice(),
+    tools: context.tools.slice(),
+  };
+}
+
+function applyPreparation(
+  context: AgentContext,
+  preparation: { messages?: readonly AgentMessage[] } | undefined,
+): void {
+  if (preparation?.messages) {
+    context.messages = preparation.messages.slice();
+  }
+}
 
 /** 浅拷贝 assistant 消息（含 content 数组元素），避免订阅者改到模型发出的原对象 */
 function cloneAssistant(message: AssistantMessage): AssistantMessage {
@@ -53,8 +70,18 @@ async function streamAssistantResponse(
   signal: AbortSignal,
 ): Promise<AssistantMessage> {
   let finalMessage: AssistantMessage | undefined;
+  signal.throwIfAborted();
+  applyPreparation(
+    context,
+    await config.prepareRequest?.(snapshotContext(context), signal),
+  );
+  signal.throwIfAborted();
+  const transformed = config.transformContext
+    ? await config.transformContext(context.messages, signal)
+    : context.messages;
+  const requestMessages = transformed.slice();
 
-  for await (const modelEvent of config.stream(context.messages, signal)) {
+  for await (const modelEvent of config.stream(requestMessages, signal)) {
     finalMessage = modelEvent.message;
 
     if (modelEvent.type === "start") {
