@@ -14,4 +14,22 @@ export {
   createHeuristicTokenEstimator,
 } from "./context.ts";
 export type { ReadParameters } from "./tools.ts";
+export {
+  ModelError,
+  isRetryableModelError,
+  toModelError,
+} from "./errors.ts";
+export type { ModelErrorCode } from "./errors.ts";
+export {
+  createDefaultRetryPolicy,
+  streamWithRetry,
+} from "./retry.ts";
+export type {
+  DefaultRetryPolicyOptions,
+  RetryContext,
+  RetryDecision,
+  RetryPolicy,
+  SleepFn,
+  StreamRetryOptions,
+} from "./retry.ts";
 export * from "./types.ts";

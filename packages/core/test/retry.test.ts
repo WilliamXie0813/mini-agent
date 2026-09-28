@@ -420,3 +420,13 @@ test("default sleep rejects immediately for an aborted signal", async () => {
     name: "AbortError",
   });
 });
+
+test("retry API is available from the package entrypoint", async () => {
+  const core = await import("../src/index.ts");
+
+  assert.equal(typeof core.ModelError, "function");
+  assert.equal(typeof core.isRetryableModelError, "function");
+  assert.equal(typeof core.toModelError, "function");
+  assert.equal(typeof core.createDefaultRetryPolicy, "function");
+  assert.equal(typeof core.streamWithRetry, "function");
+});
