@@ -90,3 +90,101 @@ export function createDefaultRetryPolicy(
     },
   };
 }
+
+export const defaultSleep: SleepFn = async (ms, signal) => {
+  signal.throwIfAborted();
+  return new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(
+        signal.reason ??
+          new DOMException("The operation was aborted", "AbortError"),
+      );
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+};
+
+export interface StreamRetryOptions {
+  startAttempt: () => AsyncIterable<ModelStreamEvent>;
+  policy: RetryPolicy;
+  sleep: SleepFn;
+  signal: AbortSignal;
+  emit: EventSink;
+}
+
+function finalAttemptError(error: ModelError, attempt: number): ModelError {
+  if (attempt === 1) return error;
+  return new ModelError(
+    error.code,
+    `${error.code} error after ${attempt} attempts: ${error.message}`,
+    {
+      retryableOverride: error.retryableOverride,
+      retryAfterMs: error.retryAfterMs,
+      cause: error,
+    },
+  );
+}
+
+export async function* streamWithRetry({
+  startAttempt,
+  policy,
+  sleep,
+  signal,
+  emit,
+}: StreamRetryOptions): AsyncIterable<ModelStreamEvent> {
+  let attempt = 1;
+  let totalDelayMs = 0;
+
+  while (true) {
+    let locked = false;
+    let receivedEnd = false;
+
+    try {
+      signal.throwIfAborted();
+      for await (const event of startAttempt()) {
+        locked = true;
+        if (event.type === "end") receivedEnd = true;
+        yield event;
+      }
+      if (receivedEnd) return;
+      throw new ModelError(
+        "network",
+        "Model stream ended before end event",
+      );
+    } catch (thrown) {
+      if (signal.aborted) throw thrown;
+      const error = toModelError(thrown);
+      if (locked) throw finalAttemptError(error, attempt);
+
+      const decision = policy.decide({
+        attempt,
+        error,
+        totalDelayMs,
+      });
+      if (!decision.retry) {
+        throw finalAttemptError(error, attempt);
+      }
+
+      const nextAttempt = attempt + 1;
+      await emit({
+        type: "model_retry_scheduled",
+        attempt: nextAttempt,
+        delayMs: decision.delayMs,
+        code: error.code,
+      });
+      await sleep(decision.delayMs, signal);
+      totalDelayMs += decision.delayMs;
+      signal.throwIfAborted();
+      await emit({
+        type: "model_retry_started",
+        attempt: nextAttempt,
+      });
+      attempt = nextAttempt;
+    }
+  }
+}

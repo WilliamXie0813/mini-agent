@@ -10,6 +10,7 @@
  * - 不使用 any：模型给出的工具参数在校验通过之前一律保持为 unknown；
  * - 所有时间相关的可选项（钩子等）都以可选函数形式挂在配置上，默认关闭。
  */
+import type { ModelErrorCode } from "./errors.ts";
 
 /** 一条 assistant 消息为什么停下：正常结束 / 请求调工具 / 出错 / 被中止 */
 export type StopReason = "stop" | "toolUse" | "error" | "aborted";
@@ -192,6 +193,16 @@ export type AgentEvent =
       toolCallId: string;
       toolName: string;
       reason: "aborted" | "control_error";
+    }
+  | {
+      type: "model_retry_scheduled";
+      attempt: number;
+      delayMs: number;
+      code: ModelErrorCode;
+    }
+  | {
+      type: "model_retry_started";
+      attempt: number;
     }
   | {
       type: "turn_end"; // 一个 Turn 结束：assistant 消息 + 本 Turn 全部工具结果
