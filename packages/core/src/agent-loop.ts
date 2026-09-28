@@ -184,6 +184,8 @@ export async function runAgentLoop(
     const toolCalls = assistant.content.filter(
       (content): content is ToolCall => content.type === "toolCall",
     );
+    // 执行器可以按真实完成顺序发送 end 事件，但只在整个批次成功后
+    // 返回按模型源顺序排列的消息，避免并发调度改变 Transcript。
     const batch = await executeToolCallBatch(toolCalls, {
       tools: context.tools,
       toolExecutionMode: config.toolExecutionMode,
@@ -194,6 +196,7 @@ export async function runAgentLoop(
       signal,
     });
     const toolResults: ToolResultMessage[] = batch.messages;
+    // Tool Result 作为一个连续提交区间写入历史，队列消息只能在 Turn 边界进入。
     for (const message of toolResults) {
       await emitMessage(message, emit);
       context.messages.push(message);

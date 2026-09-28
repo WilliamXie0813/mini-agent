@@ -10,6 +10,12 @@ import type {
   ToolResultMessage,
 } from "./types.ts";
 
+/**
+ * 执行一个 Tool Call 批次所需的运行时依赖。
+ *
+ * 这里接收已经由 Agent 规范化的配置，因此本模块只负责执行语义，
+ * 不再猜测默认值或读取 Agent 的可变状态。
+ */
 export interface ToolExecutionBatchOptions {
   tools: readonly Tool<unknown>[];
   toolExecutionMode: ToolExecutionMode;
@@ -24,6 +30,13 @@ export interface ToolExecutionBatch {
   messages: ToolResultMessage[];
 }
 
+/**
+ * 预检把“能否执行”与“何时执行”分开：
+ * - ready：工具存在、参数合法且未被 Hook 阻止；
+ * - immediate：无需调用 execute，直接产生一个错误结果。
+ *
+ * index 保存模型给出的原始顺序，供批次完成后恢复 Transcript 顺序。
+ */
 type PreparedToolCall =
   | {
       kind: "ready";
@@ -48,6 +61,7 @@ interface CompletedToolCall {
 type MarkStarted = (toolCall: ToolCall) => void;
 type MarkTerminal = (toolCallId: string) => void;
 
+/** 标记失败来自事件通道，避免被误当成普通工具异常返回给模型。 */
 class ToolEventDispatchError extends Error {
   readonly cause: unknown;
 
@@ -57,6 +71,12 @@ class ToolEventDispatchError extends Error {
   }
 }
 
+/**
+ * 将异步操作链接到同一条 Promise tail 上。
+ *
+ * 队列采用 fail-stop：第一个任务失败后，后续任务复用同一失败，
+ * 避免 Hook 或事件在批次已失效后继续改变共享状态。
+ */
 class SerialQueue {
   private tail: Promise<void> = Promise.resolve();
   private failedState = false;
@@ -85,6 +105,10 @@ class SerialQueue {
   }
 }
 
+/**
+ * 并行工具共享同一个事件出口。Dispatcher 保证 EventSink 任意时刻
+ * 只处理一个事件，从而保留 Agent 状态归约和 Listener 的串行契约。
+ */
 class ToolEventDispatcher {
   private readonly queue = new SerialQueue();
   private readonly sink: EventSink;
@@ -112,6 +136,7 @@ function errorResult(content: string): ToolExecutionResult {
   return { content, isError: true };
 }
 
+/** 在任何 Hook 或工具启动前验证模型协议中的调用 ID。 */
 function validateToolCallIds(toolCalls: readonly ToolCall[]): void {
   const ids = new Set<string>();
   for (const toolCall of toolCalls) {
@@ -125,6 +150,12 @@ function validateToolCallIds(toolCalls: readonly ToolCall[]): void {
   }
 }
 
+/**
+ * 严格按模型源顺序完成整个批次的预检。
+ *
+ * 所有调用都准备完成后才进入执行阶段，因此 beforeToolCall 可以基于
+ * 一个尚未产生工具副作用的批次做出决定。
+ */
 async function prepareToolCalls(
   toolCalls: readonly ToolCall[],
   options: ToolExecutionBatchOptions,
@@ -186,6 +217,7 @@ async function prepareToolCalls(
   return prepared;
 }
 
+/** 将内部完成记录转换成下一轮模型可见的 Tool Result Message。 */
 function toMessage(completed: CompletedToolCall): ToolResultMessage {
   return {
     role: "toolResult",
@@ -198,6 +230,11 @@ function toMessage(completed: CompletedToolCall): ToolResultMessage {
   };
 }
 
+/**
+ * Tool 主体可以并发结束，但 afterToolCall 和 terminal event 必须串行。
+ * 并发槽位直到本函数结束才释放，因此 maxConcurrency 限制的是完整的
+ * in-flight Tool Call 生命周期，而不只是 execute() 的运行时间。
+ */
 async function finalizeCall(
   prepared: PreparedToolCall,
   result: ToolExecutionResult,
@@ -229,6 +266,7 @@ async function finalizeCall(
   });
 }
 
+/** 执行一个通过预检的真实工具，并把 update 转交给串行事件通道。 */
 async function executeReady(
   prepared: Extract<PreparedToolCall, { kind: "ready" }>,
   options: ToolExecutionBatchOptions,
@@ -247,6 +285,8 @@ async function executeReady(
   options.signal.throwIfAborted();
 
   let result: ToolExecutionResult;
+  // 即使工具错误地吞掉 onUpdate 的异常，Runtime 仍会在 execute 返回后
+  // 重新抛出事件分发错误，防止它被包装成普通 Tool Result。
   let updateFailure: ToolEventDispatchError | undefined;
   try {
     result = await prepared.tool.execute(
@@ -290,6 +330,7 @@ async function executeReady(
   );
 }
 
+/** 为未知工具、非法参数和被阻止调用生成完整的 start/end 生命周期。 */
 async function executeImmediate(
   prepared: Extract<PreparedToolCall, { kind: "immediate" }>,
   options: ToolExecutionBatchOptions,
@@ -316,6 +357,7 @@ async function executeImmediate(
   );
 }
 
+/** 兼容模式：每个调用完成 Finalization 后才开始下一个调用。 */
 async function executeSequential(
   preparedCalls: readonly PreparedToolCall[],
   options: ToolExecutionBatchOptions,
@@ -350,6 +392,10 @@ async function executeSequential(
   return completed;
 }
 
+/**
+ * 并行采用显式 opt-in。任何 ready 工具未声明 parallel，
+ * 整个批次都会降级为串行；immediate 错误不会影响策略选择。
+ */
 function shouldExecuteInParallel(
   preparedCalls: readonly PreparedToolCall[],
   mode: ToolExecutionMode,
@@ -364,6 +410,14 @@ function shouldExecuteInParallel(
   );
 }
 
+/**
+ * 受限并行调度器。
+ *
+ * activeReady 只保存占用并发槽位的 ready 调用；allStarted 还包含
+ * 不占槽位的 immediate 调用，用于批次退出前等待所有已启动工作 settle。
+ * tracked Promise 会吸收单任务 rejection，并把第一个错误交给协调器统一处理，
+ * 从而避免未处理 rejection 和提前退出后遗留后台任务。
+ */
 async function executeParallel(
   preparedCalls: readonly PreparedToolCall[],
   options: ToolExecutionBatchOptions,
@@ -405,6 +459,7 @@ async function executeParallel(
     options.signal.throwIfAborted();
 
     if (prepared.kind === "immediate") {
+      // immediate 仍走事件和 Finalization，但不占用真实工具并发槽位。
       record(
         executeImmediate(
           prepared,
@@ -421,6 +476,7 @@ async function executeParallel(
     }
 
     while (activeReady.size >= options.maxConcurrency) {
+      // 等任意完整 Tool Call 生命周期结束并释放槽位，不要求按启动顺序等待。
       await Promise.race(activeReady);
       if (hasPrimaryError) break;
       options.signal.throwIfAborted();
@@ -447,6 +503,11 @@ async function executeParallel(
   return completed;
 }
 
+/**
+ * 为已经 start、但尚未 end 的调用补发取消终止事件。
+ * EventSink 自身失败时无法可靠通知外部消费者，只能由 Agent finally
+ * 清理内部 pending 状态，所以这里直接停止继续分发。
+ */
 async function emitCancelledForOpenCalls(
   started: ReadonlyMap<string, ToolCall>,
   terminal: ReadonlySet<string>,
@@ -465,6 +526,10 @@ async function emitCancelledForOpenCalls(
   }
 }
 
+/**
+ * 批次入口：预检、选择策略、等待结算，最后按模型源顺序构造消息。
+ * 在本函数成功返回前不会修改 Transcript，因此失败批次不会部分提交结果。
+ */
 export async function executeToolCallBatch(
   toolCalls: readonly ToolCall[],
   options: ToolExecutionBatchOptions,

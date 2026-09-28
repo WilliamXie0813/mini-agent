@@ -42,6 +42,7 @@ export function createReadTool(files: Readonly<Record<string, string>>): Tool<Re
   return {
     name: "read",
     description: "Read a UTF-8 file from the virtual file system",
+    // 只读取传入的不可变虚拟文件表，不共享可变执行状态，可安全并行。
     executionMode: "parallel",
     validate: validateReadArguments,
     async execute(_toolCallId, parameters, signal, onUpdate) {

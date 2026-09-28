@@ -109,7 +109,9 @@ export class Agent {
   private readonly followUpQueue = new MessageQueue();
   /** 模型入口：循环用它把 messages 换成一段 assistant 响应流 */
   private readonly stream: StreamFn;
+  /** 默认保持串行；只有调用者显式开启 parallel 才会尝试并行。 */
   private readonly toolExecutionMode: ToolExecutionMode;
+  /** 限制完整 Tool Call 生命周期数量，而不只是 execute() Promise 数量。 */
   private readonly maxToolConcurrency: number;
   /** 工具执行前的拦截钩子：可返回 block 阻止执行 */
   private readonly beforeToolCall?: BeforeToolCall;

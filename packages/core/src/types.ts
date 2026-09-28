@@ -88,6 +88,7 @@ export type ValidationResult<T> =
 /** 工具执行过程中的进度回调，循环层会把它转成 tool_execution_update 事件 */
 export type ToolUpdate = (partial: ToolExecutionResult) => Promise<void>;
 
+/** 工具是否允许与同一模型响应中的其他工具并发执行。 */
 export type ToolExecutionMode = "parallel" | "sequential";
 
 /**
@@ -99,6 +100,7 @@ export type ToolExecutionMode = "parallel" | "sequential";
 export interface Tool<TParameters> {
   name: string;
   description: string;
+  /** 缺省按 sequential 处理；工具作者必须显式确认并发安全。 */
   executionMode?: ToolExecutionMode;
   validate(argumentsValue: unknown): ValidationResult<TParameters>;
   execute(
@@ -185,6 +187,7 @@ export type AgentEvent =
       isError: boolean;
     }
   | {
+      /** 已 start 的调用因 Run 取消或控制面错误而未产生可提交结果。 */
       type: "tool_execution_cancelled";
       toolCallId: string;
       toolName: string;
@@ -310,7 +313,9 @@ export interface AgentLoopConfig {
   getFollowUpMessages(): AgentMessage[];
   hasSteeringMessages(): boolean;
   hasFollowUpMessages(): boolean;
+  /** Agent 已填充默认值，Loop 和执行器不再自行推断。 */
   toolExecutionMode: ToolExecutionMode;
+  /** ready Tool Call 的最大并发生命周期数量。 */
   maxToolConcurrency: number;
   prepareNextTurn?: PrepareNextTurn;
   prepareRequest?: PrepareRequest;
