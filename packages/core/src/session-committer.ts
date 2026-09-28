@@ -82,15 +82,20 @@ export async function openOrCreateSession(options: {
 }): Promise<OpenedSession> {
   try {
     const snapshot = await options.store.load(options.sessionId);
-    return {
-      snapshot,
-      committer: createSessionCommitter({
-        store: options.store,
-        sessionId: options.sessionId,
-        initialSequence: snapshot.lastSequence,
-        now: options.now,
-      }),
-    };
+    const committer = createSessionCommitter({
+      store: options.store,
+      sessionId: options.sessionId,
+      initialSequence: snapshot.lastSequence,
+      now: options.now,
+    });
+    if (snapshot.lastSequence === 0) {
+      // The header exists but the initial system message commit never
+      // landed (crash or rejected append during creation). Re-attempt it
+      // rather than returning a session with no system message.
+      await committer.commitMessages({ messages: [options.systemMessage] });
+      return { snapshot: await options.store.load(options.sessionId), committer };
+    }
+    return { snapshot, committer };
   } catch (error) {
     if (!(error instanceof SessionNotFoundError)) throw error;
   }
