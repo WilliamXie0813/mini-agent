@@ -40,7 +40,10 @@ export interface AgentOptions {
 }
 
 /** 订阅者签名：收到事件和本次 run 的中止信号；允许异步，循环会 await 它 */
-type Listener = (event: AgentEvent, signal: AbortSignal) => void | Promise<void>;
+type Listener = (
+  event: AgentEvent,
+  signal: AbortSignal,
+) => void | Promise<void>;
 
 /**
  * 极简 FIFO 消息队列。
@@ -76,12 +79,19 @@ interface ActiveRun {
 }
 
 export class Agent {
+  /** 事件订阅者集合；每次 processEvent 都会依次通知它们 */
   private readonly listeners = new Set<Listener>();
+  /** 插队消息队列：在下一个 Turn 边界立即消费，不等任务自然停止 */
   private readonly steeringQueue = new MessageQueue();
+  /** 追加消息队列：仅当当前任务自然停止（内层循环跑干）后才被消费 */
   private readonly followUpQueue = new MessageQueue();
+  /** 模型入口：循环用它把 messages 换成一段 assistant 响应流 */
   private readonly stream: StreamFn;
+  /** 工具执行前的拦截钩子：可返回 block 阻止执行 */
   private readonly beforeToolCall?: BeforeToolCall;
+  /** 工具执行后的改写钩子：可整体替换执行结果 */
   private readonly afterToolCall?: AfterToolCall;
+  /** Turn 结束后的调度钩子：决定 run 是结束、继续，还是走默认调度 */
   private readonly finishTurn?: FinishTurn;
   /** 有值表示正在跑；所有会启动 run 的入口都先用 assertIdle 检查它 */
   private activeRun?: ActiveRun;
@@ -158,9 +168,7 @@ export class Agent {
 
   /** 中止当前 run：信号同时传给模型流和工具；无活动 run 时是空操作 */
   abort(): void {
-    this.activeRun?.controller.abort(
-      new Error("Agent run aborted"),
-    );
+    this.activeRun?.controller.abort(new Error("Agent run aborted"));
   }
 
   /** 等待当前 run 结束；没有在跑的 run 时立即 resolve */
@@ -187,7 +195,10 @@ export class Agent {
     const messages = this.mutableState.messages;
     const lastMessage = messages.at(-1);
 
-    if (!lastMessage || messages.every((message) => message.role === "system")) {
+    if (
+      !lastMessage ||
+      messages.every((message) => message.role === "system")
+    ) {
       throw new Error("No messages to continue from");
     }
 
@@ -317,10 +328,7 @@ export class Agent {
       { type: "turn_end", message, toolResults: [] },
       signal,
     );
-    await this.processEvent(
-      { type: "agent_end", messages: [message] },
-      signal,
-    );
+    await this.processEvent({ type: "agent_end", messages: [message] }, signal);
   }
 
   /**
