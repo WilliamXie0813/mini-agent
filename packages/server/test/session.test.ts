@@ -330,6 +330,39 @@ test("reconnect receives state before recovery warnings", async () => {
   }
 });
 
+async function waitUntil(
+  predicate: () => boolean,
+  timeoutMs = 5000,
+): Promise<void> {
+  const started = Date.now();
+  while (!predicate()) {
+    if (Date.now() - started > timeoutMs) {
+      throw new Error("Timed out waiting for condition");
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
+test("closing a socket removes it from its AgentSession client set", async () => {
+  const context = await connect();
+  const session = await context.manager.getOrOpen("default");
+  // 服务端 socket 与客户端 socket 是不同实例，无法直接比对；
+  // 改为观察 close 处理器对 removeClient 的真实调用
+  let removed = false;
+  const originalRemove = session.removeClient.bind(session);
+  session.removeClient = (socket: WebSocket) => {
+    removed = true;
+    originalRemove(socket);
+  };
+  try {
+    context.socket.close();
+    await waitUntil(() => removed);
+    assert.equal(removed, true);
+  } finally {
+    await cleanup(context);
+  }
+});
+
 test("opening another session isolates broadcasts", async () => {
   const context = await connect();
   const right = await openSocket(context.url);

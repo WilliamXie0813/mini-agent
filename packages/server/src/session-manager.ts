@@ -56,6 +56,8 @@ export class SessionManager {
     return this.idGenerator();
   }
 
+  // 注意：调用方必须先 dispose 路由器（SessionSocketServer），
+  // 否则 bindings 里仍指向已 dispose 的 AgentSession
   dispose(): void {
     for (const session of this.sessions.values()) session.dispose();
     this.sessions.clear();

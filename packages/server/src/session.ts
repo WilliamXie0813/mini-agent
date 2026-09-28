@@ -173,6 +173,8 @@ export class SessionSocketServer {
       });
       return;
     }
+    // 打开期间 socket 可能已关闭：此时绝不能把它登记进 clients/bindings
+    if (socket.readyState !== socket.OPEN) return;
     session.addClient(socket);
     this.bindings.set(socket, session);
     session.sendInitialState(socket);
@@ -196,6 +198,7 @@ export class SessionSocketServer {
       return;
     }
     const command = result.command;
+    const refreshState = !isSessionCommand(command);
     void this.dispatch(socket, command)
       .catch((error: unknown) => {
         this.send(socket, {
@@ -204,7 +207,11 @@ export class SessionSocketServer {
         });
       })
       .finally(() => {
-        this.bindings.get(socket)?.broadcastState();
+        // 仅 Agent 命令需要事后状态重发；会话命令在 rebind 时已对目标
+        // socket 发过 sendInitialState，无需再向整个 session 广播
+        if (refreshState) {
+          this.bindings.get(socket)?.broadcastState();
+        }
       });
   }
 
@@ -249,6 +256,9 @@ export class SessionSocketServer {
         ? (command.sessionId ?? this.manager.createId())
         : command.sessionId;
     const session = await this.manager.getOrOpen(sessionId);
+    // 打开期间 socket 可能已关闭：保留旧绑定（close 处理器已清理），
+    // 绝不把死 socket 加进新 session
+    if (socket.readyState !== socket.OPEN) return;
     const previous = this.bindings.get(socket);
     if (previous && previous !== session) {
       previous.removeClient(socket);
