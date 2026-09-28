@@ -11,6 +11,7 @@
  * - 所有时间相关的可选项（钩子等）都以可选函数形式挂在配置上，默认关闭。
  */
 import type { ModelErrorCode } from "./errors.ts";
+import type { RetryPolicy, SleepFn } from "./retry.ts";
 
 /** 一条 assistant 消息为什么停下：正常结束 / 请求调工具 / 出错 / 被中止 */
 export type StopReason = "stop" | "toolUse" | "error" | "aborted";
@@ -92,6 +93,8 @@ export type ToolUpdate = (partial: ToolExecutionResult) => Promise<void>;
 /** 工具是否允许与同一模型响应中的其他工具并发执行。 */
 export type ToolExecutionMode = "parallel" | "sequential";
 
+export type ReplayPolicy = "safe" | "never";
+
 /**
  * 工具接口。职责分离：
  * - validate：手写校验，把 unknown 的原始参数收窄为 TParameters；非法参数永远到不了 execute；
@@ -103,6 +106,8 @@ export interface Tool<TParameters> {
   description: string;
   /** 缺省按 sequential 处理；工具作者必须显式确认并发安全。 */
   executionMode?: ToolExecutionMode;
+  /** Future recovery metadata only; the current runtime never replays tools. */
+  replay?: ReplayPolicy;
   validate(argumentsValue: unknown): ValidationResult<TParameters>;
   execute(
     toolCallId: string,
@@ -320,6 +325,8 @@ export type FinishTurn = (
  */
 export interface AgentLoopConfig {
   stream: StreamFn;
+  retryPolicy?: RetryPolicy;
+  sleep?: SleepFn;
   getSteeringMessages(): AgentMessage[];
   getFollowUpMessages(): AgentMessage[];
   hasSteeringMessages(): boolean;
