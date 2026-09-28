@@ -18,6 +18,35 @@ function createAgent(options: { delayMs?: number } = {}): Agent {
   });
 }
 
+function createAgentWithExecutionOptions(
+  overrides: Partial<ConstructorParameters<typeof Agent>[0]> = {},
+): Agent {
+  return new Agent({
+    systemPrompt: "test",
+    stream: createMockStream(),
+    tools: [],
+    ...overrides,
+  });
+}
+
+test("Agent accepts valid tool execution options", () => {
+  assert.doesNotThrow(() =>
+    createAgentWithExecutionOptions({
+      toolExecutionMode: "parallel",
+      maxToolConcurrency: 2,
+    }),
+  );
+});
+
+test("Agent rejects invalid maxToolConcurrency", () => {
+  for (const value of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+    assert.throws(
+      () => createAgentWithExecutionOptions({ maxToolConcurrency: value }),
+      /maxToolConcurrency must be a positive integer/,
+    );
+  }
+});
+
 test("Agent stores complete messages and exposes updated state to subscribers", async () => {
   const agent = createAgent();
   const observedRoles: string[][] = [];

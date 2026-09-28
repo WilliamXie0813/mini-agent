@@ -39,6 +39,8 @@ test("loop completes user to tool to final answer flow", async () => {
       getFollowUpMessages: () => [],
       hasSteeringMessages: () => false,
       hasFollowUpMessages: () => false,
+      toolExecutionMode: "sequential",
+      maxToolConcurrency: 4,
     },
     async (event) => {
       events.push(event);
@@ -103,6 +105,8 @@ test("beforeToolCall can block execution", async () => {
       getFollowUpMessages: () => [],
       hasSteeringMessages: () => false,
       hasFollowUpMessages: () => false,
+      toolExecutionMode: "sequential",
+      maxToolConcurrency: 4,
       beforeToolCall: async () => ({
         block: true,
         reason: "Reading files is blocked",
@@ -146,6 +150,8 @@ test("afterToolCall can replace a successful result", async () => {
       getFollowUpMessages: () => [],
       hasSteeringMessages: () => false,
       hasFollowUpMessages: () => false,
+      toolExecutionMode: "sequential",
+      maxToolConcurrency: 4,
       afterToolCall: async () => ({
         content: "{\"name\":\"replaced\",\"version\":\"2.0.0\"}",
         isError: false,
@@ -204,6 +210,8 @@ async function runSingleToolCall(
       getFollowUpMessages: () => [],
       hasSteeringMessages: () => false,
       hasFollowUpMessages: () => false,
+      toolExecutionMode: "sequential",
+      maxToolConcurrency: 4,
     },
     async () => {},
     new AbortController().signal,
@@ -299,6 +307,8 @@ test("finishTurn can request exactly one extra context-only Turn", async () => {
       getFollowUpMessages: () => [],
       hasSteeringMessages: () => false,
       hasFollowUpMessages: () => false,
+      toolExecutionMode: "sequential",
+      maxToolConcurrency: 4,
       finishTurn: async () => {
         turnCount += 1;
         if (!requested) {
@@ -333,6 +343,8 @@ test("finishTurn can stop before a queued follow-up", async () => {
       getFollowUpMessages: () => followUps.splice(0),
       hasSteeringMessages: () => false,
       hasFollowUpMessages: () => followUps.length > 0,
+      toolExecutionMode: "sequential",
+      maxToolConcurrency: 4,
       finishTurn: async () => ({ action: "end" }),
     },
     async () => {},
@@ -375,6 +387,8 @@ test("first Turn prepares and transforms request before streaming", async () => 
       getFollowUpMessages: () => [],
       hasSteeringMessages: () => false,
       hasFollowUpMessages: () => false,
+      toolExecutionMode: "sequential",
+      maxToolConcurrency: 4,
       prepareRequest: async (snapshot) => {
         order.push("prepareRequest");
         return {
@@ -434,6 +448,8 @@ test("later Turn starts before prepareNextTurn", async () => {
       getFollowUpMessages: () => [],
       hasSteeringMessages: () => false,
       hasFollowUpMessages: () => false,
+      toolExecutionMode: "sequential",
+      maxToolConcurrency: 4,
       prepareNextTurn: async () => {
         order.push("prepareNextTurn");
         return undefined;
@@ -467,6 +483,8 @@ test("CompletedTurn context remains stable after later replacement", async () =>
       getFollowUpMessages: () => [],
       hasSteeringMessages: () => false,
       hasFollowUpMessages: () => false,
+      toolExecutionMode: "sequential",
+      maxToolConcurrency: 4,
       finishTurn: async (turn) => {
         snapshots.push(turn.context.messages);
         turns += 1;

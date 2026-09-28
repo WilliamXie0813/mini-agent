@@ -28,6 +28,7 @@ import type {
   PrepareRequest,
   StreamFn,
   Tool,
+  ToolExecutionMode,
   TransformContext,
   UserMessage,
 } from "./types.ts";
@@ -37,12 +38,22 @@ export interface AgentOptions {
   systemPrompt: string;
   stream: StreamFn;
   tools: Tool<unknown>[];
+  toolExecutionMode?: ToolExecutionMode;
+  maxToolConcurrency?: number;
   beforeToolCall?: BeforeToolCall;
   afterToolCall?: AfterToolCall;
   finishTurn?: FinishTurn;
   prepareNextTurn?: PrepareNextTurn;
   prepareRequest?: PrepareRequest;
   transformContext?: TransformContext;
+}
+
+function normalizeMaxToolConcurrency(value: number | undefined): number {
+  const normalized = value ?? 4;
+  if (!Number.isInteger(normalized) || normalized <= 0) {
+    throw new Error("maxToolConcurrency must be a positive integer");
+  }
+  return normalized;
 }
 
 /** 订阅者签名：收到事件和本次 run 的中止信号；允许异步，循环会 await 它 */
@@ -98,6 +109,8 @@ export class Agent {
   private readonly followUpQueue = new MessageQueue();
   /** 模型入口：循环用它把 messages 换成一段 assistant 响应流 */
   private readonly stream: StreamFn;
+  private readonly toolExecutionMode: ToolExecutionMode;
+  private readonly maxToolConcurrency: number;
   /** 工具执行前的拦截钩子：可返回 block 阻止执行 */
   private readonly beforeToolCall?: BeforeToolCall;
   /** 工具执行后的改写钩子：可整体替换执行结果 */
@@ -127,6 +140,10 @@ export class Agent {
 
   constructor(options: AgentOptions) {
     this.stream = options.stream;
+    this.toolExecutionMode = options.toolExecutionMode ?? "sequential";
+    this.maxToolConcurrency = normalizeMaxToolConcurrency(
+      options.maxToolConcurrency,
+    );
     this.beforeToolCall = options.beforeToolCall;
     this.afterToolCall = options.afterToolCall;
     this.finishTurn = options.finishTurn;
@@ -284,6 +301,8 @@ export class Agent {
       getFollowUpMessages: () => this.followUpQueue.drainOne(),
       hasSteeringMessages: () => this.steeringQueue.hasMessages(),
       hasFollowUpMessages: () => this.followUpQueue.hasMessages(),
+      toolExecutionMode: this.toolExecutionMode,
+      maxToolConcurrency: this.maxToolConcurrency,
       beforeToolCall: this.beforeToolCall,
       afterToolCall: this.afterToolCall,
       finishTurn: this.finishTurn,
@@ -389,7 +408,8 @@ export class Agent {
         this.mutableState.pendingToolCalls = next;
         break;
       }
-      case "tool_execution_end": {
+      case "tool_execution_end":
+      case "tool_execution_cancelled": {
         const next = new Set(this.mutableState.pendingToolCalls);
         next.delete(event.toolCallId);
         this.mutableState.pendingToolCalls = next;

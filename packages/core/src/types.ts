@@ -88,6 +88,8 @@ export type ValidationResult<T> =
 /** 工具执行过程中的进度回调，循环层会把它转成 tool_execution_update 事件 */
 export type ToolUpdate = (partial: ToolExecutionResult) => Promise<void>;
 
+export type ToolExecutionMode = "parallel" | "sequential";
+
 /**
  * 工具接口。职责分离：
  * - validate：手写校验，把 unknown 的原始参数收窄为 TParameters；非法参数永远到不了 execute；
@@ -97,6 +99,7 @@ export type ToolUpdate = (partial: ToolExecutionResult) => Promise<void>;
 export interface Tool<TParameters> {
   name: string;
   description: string;
+  executionMode?: ToolExecutionMode;
   validate(argumentsValue: unknown): ValidationResult<TParameters>;
   execute(
     toolCallId: string,
@@ -180,6 +183,12 @@ export type AgentEvent =
       toolName: string;
       result: ToolExecutionResult;
       isError: boolean;
+    }
+  | {
+      type: "tool_execution_cancelled";
+      toolCallId: string;
+      toolName: string;
+      reason: "aborted" | "control_error";
     }
   | {
       type: "turn_end"; // 一个 Turn 结束：assistant 消息 + 本 Turn 全部工具结果
@@ -301,6 +310,8 @@ export interface AgentLoopConfig {
   getFollowUpMessages(): AgentMessage[];
   hasSteeringMessages(): boolean;
   hasFollowUpMessages(): boolean;
+  toolExecutionMode: ToolExecutionMode;
+  maxToolConcurrency: number;
   prepareNextTurn?: PrepareNextTurn;
   prepareRequest?: PrepareRequest;
   transformContext?: TransformContext;
