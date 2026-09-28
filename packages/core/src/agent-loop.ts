@@ -21,9 +21,9 @@ import type {
   CompletedTurn,
   EventSink,
   ToolCall,
-  ToolExecutionResult,
   ToolResultMessage,
 } from "./types.ts";
+import { executeToolCallBatch } from "./tool-execution.ts";
 
 function snapshotContext(context: AgentContext): AgentContextSnapshot {
   // 只复制容器，不深拷贝消息；消息在一次 Run 内按不可变值使用。
@@ -118,107 +118,6 @@ async function streamAssistantResponse(
   return finalMessage;
 }
 
-/** 构造一个错误工具结果（未知工具 / 参数非法 / 被钩子阻止 / 工具抛异常共用） */
-function errorResult(content: string): ToolExecutionResult {
-  return { content, isError: true };
-}
-
-/**
- * 执行一次工具调用的完整流水线：
- *   查工具 → 校验参数 → beforeToolCall 拦截 → execute → afterToolCall 改写
- *   → 发 tool_execution_end → 生成并定稿 ToolResultMessage → push 进历史
- *
- * 除“中止”之外的任何失败都被降级为 isError 的错误结果（喂回模型），
- * 而不是抛出 —— 工具错误对下一个模型 Turn 保持可见，run 不因此崩掉。
- * 唯独 abort 会重新抛出，让取消能打断整个循环。
- */
-async function executeToolCall(
-  context: AgentContext,
-  toolCall: ToolCall,
-  config: AgentLoopConfig,
-  emit: EventSink,
-  signal: AbortSignal,
-): Promise<ToolResultMessage> {
-  await emit({
-    type: "tool_execution_start",
-    toolCallId: toolCall.id,
-    toolName: toolCall.name,
-    argumentsValue: toolCall.arguments,
-  });
-
-  const tool = context.tools.find((candidate) => candidate.name === toolCall.name);
-  let result: ToolExecutionResult;
-
-  if (!tool) {
-    result = errorResult(`Unknown tool: ${toolCall.name}`);
-  } else {
-    const validation = tool.validate(toolCall.arguments);
-    if (!validation.ok) {
-      result = errorResult(validation.error);
-    } else {
-      // 参数已收窄为强类型，先给拦截钩子一次说“不”的机会
-      const blocked = await config.beforeToolCall?.(
-        toolCall,
-        validation.value,
-        signal,
-      );
-
-      if (blocked) {
-        result = errorResult(blocked.reason);
-      } else {
-        try {
-          result = await tool.execute(
-            toolCall.id,
-            validation.value,
-            signal,
-            // 工具内每次 onUpdate 都转译成一个 tool_execution_update 事件
-            async (partial) => {
-              await emit({
-                type: "tool_execution_update",
-                toolCallId: toolCall.id,
-                toolName: toolCall.name,
-                partial,
-              });
-            },
-          );
-        } catch (error) {
-          // 中止信号优先：取消不属于“工具错误”，向上抛出终止整个 run
-          if (signal.aborted) throw error;
-          result = errorResult(
-            error instanceof Error ? error.message : String(error),
-          );
-        }
-      }
-    }
-  }
-
-  // afterToolCall 可以整体替换结果（含把成功改成失败、改写 content/details）
-  const replacement = await config.afterToolCall?.(toolCall, result, signal);
-  const finalResult = replacement ?? result;
-  const isError = finalResult.isError === true;
-
-  await emit({
-    type: "tool_execution_end",
-    toolCallId: toolCall.id,
-    toolName: toolCall.name,
-    result: finalResult,
-    isError,
-  });
-
-  const message: ToolResultMessage = {
-    role: "toolResult",
-    toolCallId: toolCall.id,
-    toolName: toolCall.name,
-    content: finalResult.content,
-    details: finalResult.details,
-    isError,
-    timestamp: Date.now(),
-  };
-  await emitMessage(message, emit);
-  context.messages.push(message);
-  return message;
-}
-
 /**
  * 跑一个完整的 Agent run。
  *
@@ -285,11 +184,19 @@ export async function runAgentLoop(
     const toolCalls = assistant.content.filter(
       (content): content is ToolCall => content.type === "toolCall",
     );
-    const toolResults: ToolResultMessage[] = [];
-    for (const toolCall of toolCalls) {
-      toolResults.push(
-        await executeToolCall(context, toolCall, config, emit, signal),
-      );
+    const batch = await executeToolCallBatch(toolCalls, {
+      tools: context.tools,
+      toolExecutionMode: config.toolExecutionMode,
+      maxConcurrency: config.maxToolConcurrency,
+      beforeToolCall: config.beforeToolCall,
+      afterToolCall: config.afterToolCall,
+      emit,
+      signal,
+    });
+    const toolResults: ToolResultMessage[] = batch.messages;
+    for (const message of toolResults) {
+      await emitMessage(message, emit);
+      context.messages.push(message);
     }
 
     completedTurn = {
