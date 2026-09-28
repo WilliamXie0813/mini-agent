@@ -9,5 +9,9 @@ export { Agent } from "./agent.ts";
 export type { AgentOptions } from "./agent.ts";
 export { createMockStream } from "./mock-llm.ts";
 export { createReadTool } from "./tools.ts";
+export {
+  createDeterministicCompactingTransform,
+  createHeuristicTokenEstimator,
+} from "./context.ts";
 export type { ReadParameters } from "./tools.ts";
 export * from "./types.ts";

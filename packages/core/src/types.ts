@@ -197,6 +197,36 @@ export interface AgentContext {
   tools: Tool<unknown>[];
 }
 
+export interface AgentContextSnapshot {
+  readonly messages: readonly AgentMessage[];
+  readonly tools: readonly Tool<unknown>[];
+}
+
+export interface ContextPreparation {
+  messages?: readonly AgentMessage[];
+}
+
+export type PrepareRequest = (
+  context: AgentContextSnapshot,
+  signal: AbortSignal,
+) => Promise<ContextPreparation | undefined>;
+
+export type TransformContext = (
+  messages: readonly AgentMessage[],
+  signal: AbortSignal,
+) => Promise<readonly AgentMessage[]>;
+
+export interface TokenEstimator {
+  estimate(messages: readonly AgentMessage[]): number;
+}
+
+export interface DeterministicCompactingTransformOptions {
+  maxInputTokens: number;
+  preserveRecentTurns: number;
+  maxExcerptCharacters?: number;
+  estimator?: TokenEstimator;
+}
+
 /** beforeToolCall 钩子要阻止执行时的返回形状 */
 export interface BeforeToolCallResult {
   block: true;
@@ -238,8 +268,13 @@ export type FinishTurnDecision =
 export interface CompletedTurn {
   message: AssistantMessage;
   toolResults: ToolResultMessage[];
-  context: AgentContext;
+  context: AgentContextSnapshot;
 }
+
+export type PrepareNextTurn = (
+  turn: CompletedTurn,
+  signal: AbortSignal,
+) => Promise<ContextPreparation | undefined>;
 
 /** Turn 结束时的调度钩子：返回决策，告诉循环这个 run 接下来怎么走 */
 export type FinishTurn = (
@@ -255,6 +290,9 @@ export interface AgentLoopConfig {
   stream: StreamFn;
   getSteeringMessages(): AgentMessage[];
   getFollowUpMessages(): AgentMessage[];
+  prepareNextTurn?: PrepareNextTurn;
+  prepareRequest?: PrepareRequest;
+  transformContext?: TransformContext;
   beforeToolCall?: BeforeToolCall;
   afterToolCall?: AfterToolCall;
   finishTurn?: FinishTurn;
