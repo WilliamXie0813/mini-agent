@@ -49,19 +49,86 @@ test("encodeMessage preserves tool_execution_cancelled events", () => {
 
 test("parseCommand accepts valid commands", () => {
   assert.deepEqual(parseCommand('{"type":"prompt","content":"hi"}'), {
-    type: "prompt",
-    content: "hi",
+    ok: true,
+    command: { type: "prompt", content: "hi" },
   });
-  assert.deepEqual(parseCommand('{"type":"abort"}'), { type: "abort" });
-  assert.deepEqual(parseCommand('{"type":"reset"}'), { type: "reset" });
+  assert.deepEqual(parseCommand('{"type":"abort"}'), {
+    ok: true,
+    command: { type: "abort" },
+  });
+  assert.deepEqual(parseCommand('{"type":"reset"}'), {
+    ok: true,
+    command: { type: "reset" },
+  });
 });
 
 test("parseCommand rejects malformed payloads", () => {
-  assert.equal(parseCommand("not json"), undefined);
-  assert.equal(parseCommand('{"type":"prompt"}'), undefined);
-  assert.equal(parseCommand('{"type":"prompt","content":""}'), undefined);
-  assert.equal(parseCommand('{"type":"nope"}'), undefined);
-  assert.equal(parseCommand("42"), undefined);
+  const unrecognized = {
+    ok: false,
+    kind: "command",
+    message: "Unrecognized command",
+  } as const;
+  assert.deepEqual(parseCommand("not json"), unrecognized);
+  assert.deepEqual(parseCommand('{"type":"prompt"}'), unrecognized);
+  assert.deepEqual(parseCommand('{"type":"prompt","content":""}'), unrecognized);
+  assert.deepEqual(parseCommand('{"type":"nope"}'), unrecognized);
+  assert.deepEqual(parseCommand("42"), unrecognized);
+});
+
+test("parseCommand accepts session commands", () => {
+  assert.deepEqual(parseCommand('{"type":"list_sessions"}'), {
+    ok: true,
+    command: { type: "list_sessions" },
+  });
+  assert.deepEqual(parseCommand('{"type":"create_session"}'), {
+    ok: true,
+    command: { type: "create_session" },
+  });
+  assert.deepEqual(
+    parseCommand('{"type":"create_session","sessionId":"work_1"}'),
+    {
+      ok: true,
+      command: { type: "create_session", sessionId: "work_1" },
+    },
+  );
+  assert.deepEqual(parseCommand('{"type":"open_session","sessionId":"a"}'), {
+    ok: true,
+    command: { type: "open_session", sessionId: "a" },
+  });
+});
+
+test("parseCommand distinguishes malformed commands from invalid session ids", () => {
+  assert.deepEqual(
+    parseCommand('{"type":"open_session","sessionId":"../escape"}'),
+    {
+      ok: false,
+      kind: "session",
+      message: "Invalid sessionId",
+    },
+  );
+  assert.deepEqual(parseCommand('{"type":"open_session"}'), {
+    ok: false,
+    kind: "session",
+    message: "Invalid sessionId",
+  });
+  assert.deepEqual(
+    parseCommand('{"type":"create_session","sessionId":"../escape"}'),
+    {
+      ok: false,
+      kind: "session",
+      message: "Invalid sessionId",
+    },
+  );
+  assert.deepEqual(parseCommand('{"type":"create_session","sessionId":42}'), {
+    ok: false,
+    kind: "session",
+    message: "Invalid sessionId",
+  });
+  assert.deepEqual(parseCommand('{"type":"nope"}'), {
+    ok: false,
+    kind: "command",
+    message: "Unrecognized command",
+  });
 });
 
 test("serializeState omits undefined optional keys but includes defined ones", () => {

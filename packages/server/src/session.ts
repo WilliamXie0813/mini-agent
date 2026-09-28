@@ -53,12 +53,15 @@ export class AgentSession {
   }
 
   private handleMessage(socket: WebSocket, raw: string): void {
-    const command = parseCommand(raw);
-    if (!command) {
-      this.send(socket, { type: "error", message: "Unrecognized command" });
+    const result = parseCommand(raw);
+    if (!result.ok) {
+      this.send(socket, {
+        type: result.kind === "session" ? "session_error" : "error",
+        message: result.message,
+      });
       return;
     }
-    void this.execute(command)
+    void this.execute(result.command)
       .catch((error: unknown) => {
         this.send(socket, {
           type: "error",
