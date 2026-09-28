@@ -24,8 +24,11 @@ import type {
   AgentState,
   BeforeToolCall,
   FinishTurn,
+  PrepareNextTurn,
+  PrepareRequest,
   StreamFn,
   Tool,
+  TransformContext,
   UserMessage,
 } from "./types.ts";
 
@@ -37,6 +40,9 @@ export interface AgentOptions {
   beforeToolCall?: BeforeToolCall;
   afterToolCall?: AfterToolCall;
   finishTurn?: FinishTurn;
+  prepareNextTurn?: PrepareNextTurn;
+  prepareRequest?: PrepareRequest;
+  transformContext?: TransformContext;
 }
 
 /** 订阅者签名：收到事件和本次 run 的中止信号；允许异步，循环会 await 它 */
@@ -97,6 +103,9 @@ export class Agent {
   private readonly afterToolCall?: AfterToolCall;
   /** Turn 结束后的调度钩子：决定 run 是结束、继续，还是走默认调度 */
   private readonly finishTurn?: FinishTurn;
+  private readonly prepareNextTurn?: PrepareNextTurn;
+  private readonly prepareRequest?: PrepareRequest;
+  private readonly transformContext?: TransformContext;
   /** 有值表示正在跑；所有会启动 run 的入口都先用 assertIdle 检查它 */
   private activeRun?: ActiveRun;
   /**
@@ -117,6 +126,9 @@ export class Agent {
     this.beforeToolCall = options.beforeToolCall;
     this.afterToolCall = options.afterToolCall;
     this.finishTurn = options.finishTurn;
+    this.prepareNextTurn = options.prepareNextTurn;
+    this.prepareRequest = options.prepareRequest;
+    this.transformContext = options.transformContext;
     this.mutableState = {
       // 消息历史以系统提示词开头
       messages: [
@@ -271,6 +283,9 @@ export class Agent {
       beforeToolCall: this.beforeToolCall,
       afterToolCall: this.afterToolCall,
       finishTurn: this.finishTurn,
+      prepareNextTurn: this.prepareNextTurn,
+      prepareRequest: this.prepareRequest,
+      transformContext: this.transformContext,
     };
   }
 

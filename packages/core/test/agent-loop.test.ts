@@ -454,3 +454,39 @@ test("later Turn starts before prepareNextTurn", async () => {
     "stream:2",
   ]);
 });
+
+test("CompletedTurn context remains stable after later replacement", async () => {
+  const snapshots: Array<readonly AgentMessage[]> = [];
+  let turns = 0;
+  await runAgentLoop(
+    [{ role: "user", content: "start", timestamp: 1 }],
+    { messages: [], tools: [] },
+    {
+      stream: createMockStream(),
+      getSteeringMessages: () => [],
+      getFollowUpMessages: () => [],
+      hasSteeringMessages: () => false,
+      hasFollowUpMessages: () => false,
+      finishTurn: async (turn) => {
+        snapshots.push(turn.context.messages);
+        turns += 1;
+        return turns === 1 ? { action: "continue" } : undefined;
+      },
+      prepareNextTurn: async () => ({
+        messages: [{ role: "user", content: "rebuilt", timestamp: 10 }],
+      }),
+    },
+    async () => {},
+    new AbortController().signal,
+  );
+  assert.deepEqual(
+    snapshots[0]?.map((message) => message.role),
+    ["user", "assistant"],
+  );
+  assert.equal(
+    snapshots[0]?.some(
+      (message) => message.role === "user" && message.content === "rebuilt",
+    ),
+    false,
+  );
+});

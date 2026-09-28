@@ -3,7 +3,7 @@ import test from "node:test";
 import { Agent } from "../src/agent.ts";
 import { createMockStream } from "../src/mock-llm.ts";
 import { createReadTool } from "../src/tools.ts";
-import type { StreamFn, Tool } from "../src/types.ts";
+import type { AgentEvent, AgentMessage, StreamFn, Tool } from "../src/types.ts";
 
 function createAgent(options: { delayMs?: number } = {}): Agent {
   return new Agent({
@@ -275,3 +275,100 @@ test("model failure becomes an error Assistant message", async () => {
   assert.equal(finalMessage.stopReason, "error");
   assert.equal(finalMessage.errorMessage, "model exploded");
 });
+
+  test("Agent transform changes model input without changing transcript", async () => {
+    const requests: AgentMessage[][] = [];
+    const agent = new Agent({
+      systemPrompt: "system",
+      stream: async function* (messages) {
+        requests.push(messages.slice());
+        const message = {
+          role: "assistant" as const,
+          content: [{ type: "text" as const, text: "done" }],
+          stopReason: "stop" as const,
+          timestamp: 3,
+        };
+        yield { type: "start", message };
+        yield { type: "end", message };
+      },
+      tools: [],
+      transformContext: async (messages) =>
+        messages.filter((message) => message.role !== "system"),
+    });
+    await agent.prompt("hello");
+    assert.deepEqual(requests[0]?.map((message) => message.role), ["user"]);
+    assert.deepEqual(
+      agent.state.messages.map((message) => message.role),
+      ["system", "user", "assistant"],
+    );
+  });
+
+  test("prepareRequest errors become error Assistant messages", async () => {
+    const agent = new Agent({
+      systemPrompt: "system",
+      stream: createMockStream(),
+      tools: [],
+      prepareRequest: async () => {
+        throw new Error("prepare request exploded");
+      },
+    });
+    await agent.prompt("hello");
+    const final = agent.state.messages.at(-1);
+    assert.equal(final?.role, "assistant");
+    if (final?.role !== "assistant") return;
+    assert.equal(final.stopReason, "error");
+    assert.equal(final.errorMessage, "prepare request exploded");
+  });
+
+  test("aborting a slow context Hook produces an aborted Assistant message", async () => {
+    const agent = new Agent({
+      systemPrompt: "system",
+      stream: createMockStream(),
+      tools: [],
+      prepareRequest: async (_context, signal) => {
+        await new Promise<void>((_resolve, reject) => {
+          signal.addEventListener("abort", () => reject(signal.reason), {
+            once: true,
+          });
+        });
+        return undefined;
+      },
+    });
+    const running = agent.prompt("hello");
+    setTimeout(() => agent.abort(), 5);
+    await running;
+    const final = agent.state.messages.at(-1);
+    assert.equal(final?.role, "assistant");
+    if (final?.role !== "assistant") return;
+    assert.equal(final.stopReason, "aborted");
+  });
+
+  test("prepareNextTurn failure remains paired with a started Turn", async () => {
+    const events: AgentEvent[] = [];
+    let turns = 0;
+    const agent = new Agent({
+      systemPrompt: "system",
+      stream: createMockStream(),
+      tools: [],
+      finishTurn: async () => {
+        turns += 1;
+        return turns === 1 ? { action: "continue" } : undefined;
+      },
+      prepareNextTurn: async () => {
+        throw new Error("next Turn preparation failed");
+      },
+    });
+    agent.subscribe((event) => {
+      events.push(event);
+    });
+    await agent.prompt("hello");
+    assert.equal(
+      events.filter((event) => event.type === "turn_start").length,
+      2,
+    );
+    assert.equal(events.filter((event) => event.type === "turn_end").length, 2);
+    const final = agent.state.messages.at(-1);
+    assert.equal(final?.role, "assistant");
+    if (final?.role !== "assistant") return;
+    assert.equal(final.stopReason, "error");
+  });
