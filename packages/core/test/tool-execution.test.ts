@@ -648,3 +648,122 @@ test("non-JSON arguments fail before tool execution", async () => {
   );
   assert.equal(executed, false);
 });
+
+/** 记录 effect 持久化调用的 spy committer，供取消/排序断言使用。 */
+function createSpyCommitter() {
+  const started: string[] = [];
+  const finished: string[] = [];
+  const cancelled: string[] = [];
+  const committer = {
+    commitMessages: async () => {},
+    enqueue: async () => {},
+    startEffect: async (effect: { toolCallId: string }) => {
+      started.push(effect.toolCallId);
+    },
+    finishEffect: async (toolCallId: string) => {
+      finished.push(toolCallId);
+    },
+    cancelEffect: async (toolCallId: string) => {
+      cancelled.push(toolCallId);
+    },
+    reset: async () => {},
+  };
+  return { committer, started, finished, cancelled };
+}
+
+test("abort persists cancelEffect for started effects only", async () => {
+  const controller = new AbortController();
+  const first = deferred<ToolExecutionResult>();
+  const second = deferred<ToolExecutionResult>();
+  const bothStarted = deferred<void>();
+  let thirdStarted = false;
+  const events: AgentEvent[] = [];
+  const spy = createSpyCommitter();
+  const running = executeToolCallBatch(
+    [toolCall("a"), toolCall("b"), toolCall("c")],
+    {
+      ...options({
+        tools: [
+          createTool("a", async () => {
+            if (
+              events.filter(
+                (event) => event.type === "tool_execution_start",
+              ).length === 2
+            ) {
+              bothStarted.resolve();
+            }
+            return first.promise;
+          }),
+          createTool("b", async () => {
+            if (
+              events.filter(
+                (event) => event.type === "tool_execution_start",
+              ).length === 2
+            ) {
+              bothStarted.resolve();
+            }
+            return second.promise;
+          }),
+          createTool("c", async () => {
+            thirdStarted = true;
+            return { content: "c" };
+          }),
+        ],
+        events,
+        signal: controller.signal,
+      }),
+      toolExecutionMode: "parallel",
+      maxConcurrency: 2,
+      sessionCommitter: spy.committer,
+    },
+  );
+
+  await bothStarted.promise;
+  controller.abort();
+  first.resolve({ content: "ignored" });
+  second.resolve({ content: "ignored" });
+  await assert.rejects(running, (error) => error === controller.signal.reason);
+
+  assert.equal(thirdStarted, false);
+  // startEffect 恰好为每个真正开始的副作用调用一次。
+  assert.deepEqual(spy.started.slice().sort(), ["a", "b"]);
+  // 只有持久化了 effect_started 的调用才补发 cancelEffect。
+  assert.deepEqual(spy.cancelled.slice().sort(), ["a", "b"]);
+});
+
+test("cancelEffect is persisted even when the event channel has failed", async () => {
+  const sinkFailure = new Error("listener failed");
+  const spy = createSpyCommitter();
+  const events: AgentEvent[] = [];
+  const updatingTool: Tool<{ id: string }> = {
+    ...createTool("a", async () => ({ content: "unused" })),
+    async execute(_toolCallId, _parameters, _signal, onUpdate) {
+      await onUpdate({ content: "progress" });
+      return { content: "done" };
+    },
+  };
+
+  await assert.rejects(
+    executeToolCallBatch([toolCall("a")], {
+      ...options({ tools: [updatingTool] }),
+      sessionCommitter: spy.committer,
+      emit: async (event) => {
+        if (event.type === "tool_execution_update") throw sinkFailure;
+        events.push(event);
+      },
+    }),
+    (error) =>
+      error instanceof Error &&
+      error.message === "Tool event dispatch failed" &&
+      "cause" in error &&
+      error.cause === sinkFailure,
+  );
+
+  assert.deepEqual(spy.started, ["a"]);
+  // 事件通道已失效：取消事件被跳过，但取消记录仍然落盘。
+  assert.deepEqual(spy.cancelled, ["a"]);
+  assert.equal(
+    events.some((event) => event.type === "tool_execution_cancelled"),
+    false,
+  );
+});

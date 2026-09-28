@@ -10,7 +10,7 @@ import type {
   ToolExecutionResult,
   ToolResultMessage,
 } from "./types.ts";
-import type { SessionCommitter } from "./session.ts";
+import type { JsonValue, SessionCommitter } from "./session.ts";
 import { toJsonValue } from "./session-store.ts";
 
 /**
@@ -52,6 +52,8 @@ type PreparedToolCall =
       toolCall: ToolCall;
       tool: Tool<unknown>;
       parameters: unknown;
+      /** 预检时已批准的持久化参数，与 effect intent 落盘值严格一致。 */
+      argumentsJson: JsonValue;
     }
   | {
       kind: "immediate";
@@ -186,9 +188,11 @@ async function prepareToolCalls(
       continue;
     }
 
-    // ready 调用的 effect intent 依赖可持久化的参数；任何已注册工具的
-    // 非 JSON 参数都必须在执行任何副作用之前让整个批次失败。
-    toJsonValue(toolCall.arguments);
+    // 两种参数失败的语义不同：
+    // - 非 JSON 参数直接抛错，让整个批次在任何副作用开始前失败（effect intent
+    //   依赖可持久化的参数，无法记录 intent 的调用绝不允许执行）；
+    // - validate 失败只影响本调用，降级为 immediate 错误结果反馈给模型。
+    const argumentsJson = toJsonValue(toolCall.arguments);
 
     const validation = tool.validate(toolCall.arguments);
     if (!validation.ok) {
@@ -223,6 +227,7 @@ async function prepareToolCalls(
       toolCall,
       tool,
       parameters: validation.value,
+      argumentsJson,
     });
   }
 
@@ -297,7 +302,7 @@ async function executeReady(
   await options.sessionCommitter?.startEffect({
     toolCallId: prepared.toolCall.id,
     toolName: prepared.toolCall.name,
-    arguments: toJsonValue(prepared.toolCall.arguments),
+    arguments: prepared.argumentsJson,
     replay: prepared.tool.replay ?? "never",
   });
   effectStarted.add(prepared.toolCall.id);

@@ -928,3 +928,93 @@ test("first Turn falls back to follow-up reservation when prompts are empty and 
     ],
   );
 });
+
+test("finishEffect runs only for started effects and after the tool result commit", async () => {
+  const order: string[] = [];
+  const started: string[] = [];
+  const finished: string[] = [];
+  const cancelled: string[] = [];
+  const context = {
+    messages: [] as AgentMessage[],
+    tools: [createDeferredTool("known", Promise.resolve({ content: "ok" }))],
+  };
+  const stream: StreamFn = async function* (messages) {
+    if (messages.at(-1)?.role === "toolResult") {
+      const message: AssistantMessage = {
+        id: "assistant-done",
+        role: "assistant",
+        content: [{ type: "text", text: "done" }],
+        stopReason: "stop",
+        timestamp: 3,
+      };
+      yield { type: "start", message };
+      yield { type: "end", message };
+      return;
+    }
+
+    const calls: ToolCall[] = [
+      { type: "toolCall", id: "call-known", name: "known", arguments: {} },
+      { type: "toolCall", id: "call-missing", name: "missing", arguments: {} },
+    ];
+    const start: AssistantMessage = {
+      id: "assistant-tool-calls",
+      role: "assistant",
+      content: [],
+      stopReason: "toolUse",
+      timestamp: 2,
+    };
+    const end: AssistantMessage = { ...start, content: calls };
+    yield { type: "start", message: start };
+    for (const toolCall of calls) {
+      yield { type: "tool_call", toolCall, message: end };
+    }
+    yield { type: "end", message: end };
+  };
+
+  await runAgentLoop(
+    [{ id: "user-run", role: "user", content: "run", timestamp: 1 }],
+    context,
+    {
+      ...baseLoopConfig(stream),
+      sessionCommitter: {
+        commitMessages: async (commit) => {
+          for (const message of commit.messages) {
+            order.push(
+              message.role === "toolResult"
+                ? `commit-tool-result:${message.toolCallId}`
+                : `commit:${message.role}`,
+            );
+          }
+        },
+        enqueue: async () => {},
+        startEffect: async (effect) => {
+          started.push(effect.toolCallId);
+          order.push(`start:${effect.toolCallId}`);
+        },
+        finishEffect: async (toolCallId) => {
+          finished.push(toolCallId);
+          order.push(`finish:${toolCallId}`);
+        },
+        cancelEffect: async (toolCallId) => {
+          cancelled.push(toolCallId);
+        },
+        reset: async () => {},
+      },
+    },
+    async () => {},
+    new AbortController().signal,
+  );
+
+  // Only the real tool begins an external effect; the unknown tool call gets
+  // an immediate error result and must never produce effect records.
+  assert.deepEqual(started, ["call-known"]);
+  assert.deepEqual(finished, ["call-known"]);
+  assert.deepEqual(cancelled, []);
+  // finishEffect must run after the Tool Result message is durable.
+  const commitKnown = order.indexOf("commit-tool-result:call-known");
+  const finishKnown = order.indexOf("finish:call-known");
+  assert.ok(commitKnown >= 0);
+  assert.ok(finishKnown > commitKnown);
+  assert.equal(order.includes("finish:call-missing"), false);
+  assert.equal(order.includes("start:call-missing"), false);
+});
