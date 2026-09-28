@@ -3,7 +3,14 @@ import test from "node:test";
 import { Agent } from "../src/agent.ts";
 import { createMockStream } from "../src/mock-llm.ts";
 import { createReadTool } from "../src/tools.ts";
-import type { AgentEvent, AgentMessage, StreamFn, Tool } from "../src/types.ts";
+import type {
+  AgentEvent,
+  AgentMessage,
+  AssistantMessage,
+  StreamFn,
+  Tool,
+  ToolCall,
+} from "../src/types.ts";
 
 function createAgent(options: { delayMs?: number } = {}): Agent {
   return new Agent({
@@ -27,6 +34,41 @@ function createAgentWithExecutionOptions(
     tools: [],
     ...overrides,
   });
+}
+
+function createNamedToolCallStream(names: readonly string[]): StreamFn {
+  return async function* (messages) {
+    if (messages.at(-1)?.role === "toolResult") {
+      const done: AssistantMessage = {
+        role: "assistant",
+        content: [{ type: "text", text: "done" }],
+        stopReason: "stop",
+        timestamp: Date.now(),
+      };
+      yield { type: "start", message: done };
+      yield { type: "end", message: done };
+      return;
+    }
+
+    const calls: ToolCall[] = names.map((name) => ({
+      type: "toolCall",
+      id: `call-${name}`,
+      name,
+      arguments: {},
+    }));
+    const start: AssistantMessage = {
+      role: "assistant",
+      content: [],
+      stopReason: "toolUse",
+      timestamp: Date.now(),
+    };
+    const end: AssistantMessage = { ...start, content: calls };
+    yield { type: "start", message: start };
+    for (const toolCall of calls) {
+      yield { type: "tool_call", toolCall, message: end };
+    }
+    yield { type: "end", message: end };
+  };
 }
 
 test("Agent accepts valid tool execution options", () => {
@@ -146,6 +188,89 @@ test("abort produces an aborted Assistant message", async () => {
   if (finalMessage?.role !== "assistant") return;
   assert.equal(finalMessage.stopReason, "aborted");
   assert.equal(agent.state.isStreaming, false);
+});
+
+test("Agent abort clears pending parallel tools through cancelled events", async () => {
+  const tools: Tool<unknown>[] = ["a", "b"].map((name) => ({
+    name,
+    description: name,
+    executionMode: "parallel",
+    validate: () => ({ ok: true, value: {} }),
+    async execute(_id, _parameters, signal) {
+      signal.throwIfAborted();
+      await new Promise<void>((_resolve, reject) => {
+        signal.addEventListener("abort", () => reject(signal.reason), {
+          once: true,
+        });
+      });
+      return { content: "unreachable" };
+    },
+  }));
+  const agent = new Agent({
+    systemPrompt: "test",
+    stream: createNamedToolCallStream(["a", "b"]),
+    tools,
+    toolExecutionMode: "parallel",
+    maxToolConcurrency: 2,
+  });
+  const events: AgentEvent[] = [];
+  agent.subscribe((event) => {
+    events.push(event);
+    if (
+      events.filter((candidate) => candidate.type === "tool_execution_start")
+        .length === 2
+    ) {
+      agent.abort();
+    }
+  });
+
+  await agent.prompt("run");
+
+  assert.equal(
+    events.filter((event) => event.type === "tool_execution_cancelled").length,
+    2,
+  );
+  assert.deepEqual([...agent.state.pendingToolCalls], []);
+  const finalMessage = agent.state.messages.at(-1);
+  assert.equal(finalMessage?.role, "assistant");
+  if (finalMessage?.role !== "assistant") return;
+  assert.equal(finalMessage.stopReason, "aborted");
+});
+
+test("Agent finally clears pending state when a listener fails", async () => {
+  const agent = new Agent({
+    systemPrompt: "test",
+    stream: createNamedToolCallStream(["a"]),
+    tools: [
+      {
+        name: "a",
+        description: "a",
+        executionMode: "parallel",
+        validate: () => ({ ok: true, value: {} }),
+        async execute() {
+          return { content: "a" };
+        },
+      },
+    ],
+    toolExecutionMode: "parallel",
+  });
+  let failed = false;
+  agent.subscribe((event) => {
+    if (event.type === "tool_execution_start" && !failed) {
+      failed = true;
+      throw new Error("listener failed");
+    }
+  });
+
+  await agent.prompt("run");
+
+  assert.equal(failed, true);
+  assert.deepEqual([...agent.state.pendingToolCalls], []);
+  const finalMessage = agent.state.messages.at(-1);
+  assert.equal(finalMessage?.role, "assistant");
+  if (finalMessage?.role !== "assistant") return;
+  assert.equal(finalMessage.stopReason, "error");
+  assert.equal(finalMessage.errorMessage, "Tool event dispatch failed");
 });
 
 test("continue resumes from an existing user tail without duplicating it", async () => {

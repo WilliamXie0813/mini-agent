@@ -10,6 +10,7 @@ import type {
   StreamFn,
   Tool,
   ToolCall,
+  ToolExecutionResult,
 } from "../src/types.ts";
 
 test("loop completes user to tool to final answer flow", async () => {
@@ -218,6 +219,131 @@ async function runSingleToolCall(
   );
   return context.messages;
 }
+
+interface Deferred<T> {
+  promise: Promise<T>;
+  resolve(value: T): void;
+}
+
+function deferred<T>(): Deferred<T> {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
+
+function createTwoToolCallStream(): StreamFn {
+  return async function* (messages) {
+    if (messages.at(-1)?.role === "toolResult") {
+      const message: AssistantMessage = {
+        role: "assistant",
+        content: [{ type: "text", text: "done" }],
+        stopReason: "stop",
+        timestamp: 3,
+      };
+      yield { type: "start", message };
+      yield { type: "end", message };
+      return;
+    }
+
+    const calls: ToolCall[] = [
+      { type: "toolCall", id: "a", name: "a", arguments: {} },
+      { type: "toolCall", id: "b", name: "b", arguments: {} },
+    ];
+    const start: AssistantMessage = {
+      role: "assistant",
+      content: [],
+      stopReason: "toolUse",
+      timestamp: 2,
+    };
+    const end: AssistantMessage = { ...start, content: calls };
+    yield { type: "start", message: start };
+    for (const toolCall of calls) {
+      yield { type: "tool_call", toolCall, message: end };
+    }
+    yield { type: "end", message: end };
+  };
+}
+
+function createDeferredTool(
+  name: string,
+  result: Promise<ToolExecutionResult>,
+): Tool<unknown> {
+  return {
+    name,
+    description: name,
+    executionMode: "parallel",
+    validate: () => ({ ok: true, value: {} }),
+    async execute() {
+      return result;
+    },
+  };
+}
+
+test("parallel tools emit completion order but commit model source order", async () => {
+  const first = deferred<ToolExecutionResult>();
+  const second = deferred<ToolExecutionResult>();
+  const bothStarted = deferred<void>();
+  const secondEnded = deferred<void>();
+  const events: AgentEvent[] = [];
+  const context = {
+    messages: [] as AgentMessage[],
+    tools: [
+      createDeferredTool("a", first.promise),
+      createDeferredTool("b", second.promise),
+    ],
+  };
+
+  const running = runAgentLoop(
+    [{ role: "user", content: "run both", timestamp: 1 }],
+    context,
+    {
+      stream: createTwoToolCallStream(),
+      getSteeringMessages: () => [],
+      getFollowUpMessages: () => [],
+      hasSteeringMessages: () => false,
+      hasFollowUpMessages: () => false,
+      toolExecutionMode: "parallel",
+      maxToolConcurrency: 2,
+    },
+    async (event) => {
+      events.push(event);
+      if (
+        events.filter((candidate) => candidate.type === "tool_execution_start")
+          .length === 2
+      ) {
+        bothStarted.resolve();
+      }
+      if (
+        event.type === "tool_execution_end" &&
+        event.toolCallId === "b"
+      ) {
+        secondEnded.resolve();
+      }
+    },
+    new AbortController().signal,
+  );
+
+  await bothStarted.promise;
+  second.resolve({ content: "B" });
+  await secondEnded.promise;
+  first.resolve({ content: "A" });
+  await running;
+
+  assert.deepEqual(
+    events
+      .filter((event) => event.type === "tool_execution_end")
+      .map((event) => event.toolCallId),
+    ["b", "a"],
+  );
+  assert.deepEqual(
+    context.messages
+      .filter((message) => message.role === "toolResult")
+      .map((message) => message.toolCallId),
+    ["a", "b"],
+  );
+});
 
 test("unknown tool becomes an explicit error tool result", async () => {
   const messages = await runSingleToolCall(

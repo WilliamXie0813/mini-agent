@@ -45,6 +45,9 @@ interface CompletedToolCall {
   result: ToolExecutionResult;
 }
 
+type MarkStarted = (toolCall: ToolCall) => void;
+type MarkTerminal = (toolCallId: string) => void;
+
 class ToolEventDispatchError extends Error {
   readonly cause: unknown;
 
@@ -201,6 +204,7 @@ async function finalizeCall(
   options: ToolExecutionBatchOptions,
   events: ToolEventDispatcher,
   finalization: SerialQueue,
+  markTerminal: MarkTerminal,
 ): Promise<CompletedToolCall> {
   return finalization.enqueue(async () => {
     const replacement = await options.afterToolCall?.(
@@ -216,6 +220,7 @@ async function finalizeCall(
       result: finalResult,
       isError: finalResult.isError === true,
     });
+    markTerminal(prepared.toolCall.id);
     return {
       index: prepared.index,
       toolCall: prepared.toolCall,
@@ -229,6 +234,8 @@ async function executeReady(
   options: ToolExecutionBatchOptions,
   events: ToolEventDispatcher,
   finalization: SerialQueue,
+  markStarted: MarkStarted,
+  markTerminal: MarkTerminal,
 ): Promise<CompletedToolCall> {
   await events.emit({
     type: "tool_execution_start",
@@ -236,6 +243,7 @@ async function executeReady(
     toolName: prepared.toolCall.name,
     argumentsValue: prepared.toolCall.arguments,
   });
+  markStarted(prepared.toolCall);
   options.signal.throwIfAborted();
 
   let result: ToolExecutionResult;
@@ -264,6 +272,7 @@ async function executeReady(
     );
     if (updateFailure) throw updateFailure;
   } catch (error) {
+    if (updateFailure) throw updateFailure;
     if (error instanceof ToolEventDispatchError || options.signal.aborted) {
       throw error;
     }
@@ -271,7 +280,14 @@ async function executeReady(
   }
 
   options.signal.throwIfAborted();
-  return finalizeCall(prepared, result, options, events, finalization);
+  return finalizeCall(
+    prepared,
+    result,
+    options,
+    events,
+    finalization,
+    markTerminal,
+  );
 }
 
 async function executeImmediate(
@@ -279,6 +295,8 @@ async function executeImmediate(
   options: ToolExecutionBatchOptions,
   events: ToolEventDispatcher,
   finalization: SerialQueue,
+  markStarted: MarkStarted,
+  markTerminal: MarkTerminal,
 ): Promise<CompletedToolCall> {
   await events.emit({
     type: "tool_execution_start",
@@ -286,6 +304,7 @@ async function executeImmediate(
     toolName: prepared.toolCall.name,
     argumentsValue: prepared.toolCall.arguments,
   });
+  markStarted(prepared.toolCall);
   options.signal.throwIfAborted();
   return finalizeCall(
     prepared,
@@ -293,6 +312,7 @@ async function executeImmediate(
     options,
     events,
     finalization,
+    markTerminal,
   );
 }
 
@@ -301,17 +321,148 @@ async function executeSequential(
   options: ToolExecutionBatchOptions,
   events: ToolEventDispatcher,
   finalization: SerialQueue,
+  markStarted: MarkStarted,
+  markTerminal: MarkTerminal,
 ): Promise<CompletedToolCall[]> {
   const completed: CompletedToolCall[] = [];
   for (const prepared of preparedCalls) {
     options.signal.throwIfAborted();
     completed.push(
       prepared.kind === "ready"
-        ? await executeReady(prepared, options, events, finalization)
-        : await executeImmediate(prepared, options, events, finalization),
+        ? await executeReady(
+            prepared,
+            options,
+            events,
+            finalization,
+            markStarted,
+            markTerminal,
+          )
+        : await executeImmediate(
+            prepared,
+            options,
+            events,
+            finalization,
+            markStarted,
+            markTerminal,
+          ),
     );
   }
   return completed;
+}
+
+function shouldExecuteInParallel(
+  preparedCalls: readonly PreparedToolCall[],
+  mode: ToolExecutionMode,
+): boolean {
+  return (
+    mode === "parallel" &&
+    preparedCalls.every(
+      (prepared) =>
+        prepared.kind === "immediate" ||
+        prepared.tool.executionMode === "parallel",
+    )
+  );
+}
+
+async function executeParallel(
+  preparedCalls: readonly PreparedToolCall[],
+  options: ToolExecutionBatchOptions,
+  events: ToolEventDispatcher,
+  finalization: SerialQueue,
+  markStarted: MarkStarted,
+  markTerminal: MarkTerminal,
+): Promise<CompletedToolCall[]> {
+  const completed: CompletedToolCall[] = [];
+  const activeReady = new Set<Promise<void>>();
+  const allStarted: Promise<void>[] = [];
+  let hasPrimaryError = false;
+  let primaryError: unknown;
+
+  const record = (
+    promise: Promise<CompletedToolCall>,
+    consumesSlot: boolean,
+  ): void => {
+    let tracked!: Promise<void>;
+    tracked = promise
+      .then((value) => {
+        completed.push(value);
+      })
+      .catch((error: unknown) => {
+        if (!hasPrimaryError) {
+          hasPrimaryError = true;
+          primaryError = error;
+        }
+      })
+      .finally(() => {
+        if (consumesSlot) activeReady.delete(tracked);
+      });
+    allStarted.push(tracked);
+    if (consumesSlot) activeReady.add(tracked);
+  };
+
+  for (const prepared of preparedCalls) {
+    if (hasPrimaryError) break;
+    options.signal.throwIfAborted();
+
+    if (prepared.kind === "immediate") {
+      record(
+        executeImmediate(
+          prepared,
+          options,
+          events,
+          finalization,
+          markStarted,
+          markTerminal,
+        ),
+        false,
+      );
+      await Promise.resolve();
+      continue;
+    }
+
+    while (activeReady.size >= options.maxConcurrency) {
+      await Promise.race(activeReady);
+      if (hasPrimaryError) break;
+      options.signal.throwIfAborted();
+    }
+    if (hasPrimaryError) break;
+
+    record(
+      executeReady(
+        prepared,
+        options,
+        events,
+        finalization,
+        markStarted,
+        markTerminal,
+      ),
+      true,
+    );
+    await Promise.resolve();
+  }
+
+  await Promise.allSettled(allStarted);
+  options.signal.throwIfAborted();
+  if (hasPrimaryError) throw primaryError;
+  return completed;
+}
+
+async function emitCancelledForOpenCalls(
+  started: ReadonlyMap<string, ToolCall>,
+  terminal: ReadonlySet<string>,
+  reason: "aborted" | "control_error",
+  events: ToolEventDispatcher,
+): Promise<void> {
+  if (events.failed) return;
+  for (const toolCall of started.values()) {
+    if (terminal.has(toolCall.id)) continue;
+    await events.emit({
+      type: "tool_execution_cancelled",
+      toolCallId: toolCall.id,
+      toolName: toolCall.name,
+      reason,
+    });
+  }
 }
 
 export async function executeToolCallBatch(
@@ -323,12 +474,44 @@ export async function executeToolCallBatch(
   const prepared = await prepareToolCalls(toolCalls, options);
   const events = new ToolEventDispatcher(options.emit);
   const finalization = new SerialQueue();
-  const completed = await executeSequential(
-    prepared,
-    options,
-    events,
-    finalization,
-  );
+  const started = new Map<string, ToolCall>();
+  const terminal = new Set<string>();
+  const markStarted = (toolCall: ToolCall): void => {
+    started.set(toolCall.id, toolCall);
+  };
+  const markTerminal = (toolCallId: string): void => {
+    terminal.add(toolCallId);
+  };
+
+  let completed: CompletedToolCall[];
+  try {
+    completed = shouldExecuteInParallel(prepared, options.toolExecutionMode)
+      ? await executeParallel(
+          prepared,
+          options,
+          events,
+          finalization,
+          markStarted,
+          markTerminal,
+        )
+      : await executeSequential(
+          prepared,
+          options,
+          events,
+          finalization,
+          markStarted,
+          markTerminal,
+        );
+  } catch (error) {
+    const reason = options.signal.aborted ? "aborted" : "control_error";
+    try {
+      await emitCancelledForOpenCalls(started, terminal, reason, events);
+    } catch {
+      // Preserve the original control error or abort reason.
+    }
+    if (options.signal.aborted) options.signal.throwIfAborted();
+    throw error;
+  }
 
   completed.sort((left, right) => left.index - right.index);
   return { messages: completed.map(toMessage) };
