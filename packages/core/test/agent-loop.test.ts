@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { runAgentLoop } from "../src/agent-loop.ts";
+import { ModelError } from "../src/errors.ts";
 import { createMockStream } from "../src/mock-llm.ts";
+import { createDefaultRetryPolicy } from "../src/retry.ts";
 import { createReadTool } from "../src/tools.ts";
 import type {
   AgentEvent,
@@ -647,4 +649,174 @@ test("CompletedTurn context remains stable after later replacement", async () =>
     ),
     false,
   );
+});
+
+function baseLoopConfig(stream: StreamFn) {
+  return {
+    stream,
+    getSteeringMessages: () => [],
+    getFollowUpMessages: () => [],
+    hasSteeringMessages: () => false,
+    hasFollowUpMessages: () => false,
+    toolExecutionMode: "sequential" as const,
+    maxToolConcurrency: 4,
+  };
+}
+
+test("Loop retries with one request projection and commits one Assistant message", async () => {
+  const context = {
+    messages: [] as AgentMessage[],
+    tools: [],
+  };
+  const requests: Array<readonly AgentMessage[]> = [];
+  const events: AgentEvent[] = [];
+  let attempts = 0;
+  let prepareCalls = 0;
+  let transformCalls = 0;
+
+  const stream: StreamFn = async function* (messages) {
+    attempts += 1;
+    requests.push(messages);
+    if (attempts === 1) {
+      throw new ModelError("network", "offline");
+    }
+    const message: AssistantMessage = {
+      role: "assistant",
+      content: [{ type: "text", text: "done" }],
+      stopReason: "stop",
+      timestamp: 3,
+    };
+    yield { type: "start", message: { ...message, content: [] } };
+    yield { type: "end", message };
+  };
+
+  await runAgentLoop(
+    [{ role: "user", content: "hello", timestamp: 1 }],
+    context,
+    {
+      ...baseLoopConfig(stream),
+      retryPolicy: createDefaultRetryPolicy({ random: () => 0.5 }),
+      sleep: async () => {},
+      prepareRequest: async () => {
+        prepareCalls += 1;
+        return undefined;
+      },
+      transformContext: async (messages) => {
+        transformCalls += 1;
+        return messages.slice();
+      },
+    },
+    async (event) => {
+      events.push(event);
+    },
+    new AbortController().signal,
+  );
+
+  assert.equal(attempts, 2);
+  assert.equal(prepareCalls, 1);
+  assert.equal(transformCalls, 1);
+  assert.equal(requests[0], requests[1]);
+  assert.equal(
+    context.messages.filter((message) => message.role === "assistant").length,
+    1,
+  );
+  assert.deepEqual(
+    events
+      .filter((event) =>
+        event.type.startsWith("model_retry_") ||
+        event.type.startsWith("message_"),
+      )
+      .map((event) => event.type),
+    [
+      "message_start",
+      "message_end",
+      "model_retry_scheduled",
+      "model_retry_started",
+      "message_start",
+      "message_end",
+    ],
+  );
+});
+
+test("Loop rejects incomplete streams even when retry is disabled", async () => {
+  const context = {
+    messages: [] as AgentMessage[],
+    tools: [],
+  };
+
+  await assert.rejects(
+    runAgentLoop(
+      [{ role: "user", content: "hello", timestamp: 1 }],
+      context,
+      baseLoopConfig(async function* () {
+        yield {
+          type: "start",
+          message: {
+            role: "assistant",
+            content: [],
+            stopReason: "stop",
+            timestamp: 2,
+          },
+        };
+      }),
+      async () => {},
+      new AbortController().signal,
+    ),
+    /Model stream ended before end event/,
+  );
+  assert.equal(
+    context.messages.some((message) => message.role === "assistant"),
+    false,
+  );
+});
+
+test("tool failures stay Tool Results and never call model retry policy", async () => {
+  let decisions = 0;
+  const context = {
+    messages: [] as AgentMessage[],
+    tools: [
+      {
+        name: "explode",
+        description: "explode",
+        replay: "never" as const,
+        validate: () => ({ ok: true as const, value: {} }),
+        async execute() {
+          throw new Error("tool exploded");
+        },
+      },
+    ] as Tool<unknown>[],
+  };
+
+  await runAgentLoop(
+    [{ role: "user", content: "run", timestamp: 1 }],
+    context,
+    {
+      ...baseLoopConfig(
+        createSingleToolCallStream({
+          type: "toolCall",
+          id: "call-explode",
+          name: "explode",
+          arguments: {},
+        }),
+      ),
+      retryPolicy: {
+        decide() {
+          decisions += 1;
+          return { retry: false };
+        },
+      },
+      sleep: async () => {},
+    },
+    async () => {},
+    new AbortController().signal,
+  );
+
+  const toolResult = context.messages.find(
+    (message) => message.role === "toolResult",
+  );
+  assert.equal(toolResult?.role, "toolResult");
+  if (toolResult?.role !== "toolResult") return;
+  assert.equal(toolResult.isError, true);
+  assert.equal(toolResult.content, "tool exploded");
+  assert.equal(decisions, 0);
 });

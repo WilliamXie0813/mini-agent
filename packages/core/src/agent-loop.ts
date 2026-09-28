@@ -24,6 +24,7 @@ import type {
   ToolResultMessage,
 } from "./types.ts";
 import { executeToolCallBatch } from "./tool-execution.ts";
+import { streamWithRetry } from "./retry.ts";
 
 function snapshotContext(context: AgentContext): AgentContextSnapshot {
   // 只复制容器，不深拷贝消息；消息在一次 Run 内按不可变值使用。
@@ -83,8 +84,22 @@ async function streamAssistantResponse(
     : context.messages;
   const requestMessages = transformed.slice();
   // requestMessages 是一次性投影；后续 Assistant 仍写回 context.messages。
+  // 重试时所有 attempt 共享同一个 requestMessages 数组对象。
 
-  for await (const modelEvent of config.stream(requestMessages, signal)) {
+  const stream =
+    config.retryPolicy && config.sleep
+      ? streamWithRetry({
+          startAttempt: () => config.stream(requestMessages, signal),
+          policy: config.retryPolicy,
+          sleep: config.sleep,
+          signal,
+          emit,
+        })
+      : config.stream(requestMessages, signal);
+
+  let receivedEnd = false;
+  for await (const modelEvent of stream) {
+    if (modelEvent.type === "end") receivedEnd = true;
     finalMessage = modelEvent.message;
 
     if (modelEvent.type === "start") {
@@ -110,8 +125,8 @@ async function streamAssistantResponse(
     await emit({ type: "message_end", message: modelEvent.message });
   }
 
-  if (!finalMessage) {
-    throw new Error("Model stream ended without an Assistant message");
+  if (!receivedEnd || !finalMessage) {
+    throw new Error("Model stream ended before end event");
   }
 
   context.messages.push(finalMessage);
