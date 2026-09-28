@@ -1,5 +1,7 @@
 # 阶段 2：并行与串行工具执行
 
+正式实施契约见：[并行与串行工具执行设计](../superpowers/specs/2026-09-28-tool-execution-design-zh.md)。
+
 ## 当前问题
 
 当前 `agent-loop.ts` 使用：
@@ -248,4 +250,3 @@ Assistant toolCalls
 - 为什么事件完成顺序可以不同，但 Tool Result 顺序必须稳定？
 - 为什么参数验证应在并行执行前完成？
 - 为什么工具重试不能简单复用模型重试逻辑？
-
