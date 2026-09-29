@@ -20,6 +20,11 @@ export interface SerializableAgentState {
   queues: QueueState;
 }
 
+/**
+ * 客户端命令。协议契约：open_session / create_session 是异步重绑定——
+ * 客户端必须等待 session_opened 响应后再发送后续命令，否则紧随其后的
+ * agent 命令可能仍派发到旧会话（per-socket dispatch 不串行化）。
+ */
 export type ClientCommand =
   | { type: "prompt"; content: string }
   | { type: "steer"; content: string }
