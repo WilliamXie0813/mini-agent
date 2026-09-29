@@ -91,12 +91,19 @@ export async function executeParallel(
     promise: Promise<CompletedToolCall>,
     consumesSlot: boolean,
   ): void => {
+    // tracked 在声明时被“掏空”（let 不赋值），随后立即赋值为整条
+    // 处理链。finally 回调引用 tracked 时看起来它还没赋值，但
+    // finally 只会在 promise settle 后运行 —— 那时赋值早已完成。
+    // 这个自引用是为了能在 activeReady 集合里精确删除“自己”。
     let tracked!: Promise<void>;
     tracked = promise
       .then((value) => {
         completed.push(value);
       })
       .catch((error: unknown) => {
+        // 不在单任务里抛错，只记录第一个错误（primary error），
+        // 由协调器在主循环末尾统一抛出 —— 避免未处理 rejection，
+        // 也避免某个任务失败时其他已启动任务变成孤儿。
         if (!hasPrimaryError) {
           hasPrimaryError = true;
           primaryError = error;
@@ -126,6 +133,8 @@ export async function executeParallel(
         ),
         false,
       );
+      // 让出一个微任务 tick：给刚启动的调用一次机会把它的
+      // tool_execution_start 排进事件队列，保持事件顺序与启动顺序一致。
       await Promise.resolve();
       continue;
     }
@@ -149,6 +158,7 @@ export async function executeParallel(
       ),
       true,
     );
+    // 同上：让出微任务，保证 start 事件先于下一次循环迭代入队。
     await Promise.resolve();
   }
 

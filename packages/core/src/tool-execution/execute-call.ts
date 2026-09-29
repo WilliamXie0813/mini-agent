@@ -83,8 +83,10 @@ export async function executeReady(
   options.signal.throwIfAborted();
 
   let result: ToolExecutionResult;
-  // 即使工具错误地吞掉 onUpdate 的异常，Runtime 仍会在 execute 返回后
-  // 重新抛出事件分发错误，防止它被包装成普通 Tool Result。
+  // updateFailure 是本文件最难的一段，动机是：onUpdate 是交给工具
+  // 实现的回调，工具可以 try/catch 把它吞掉。如果事件分发失败被吞，
+  // 工具会带着一个“残缺事件流”正常返回，错误还会被包装成 Tool Result
+  // 喂给模型。所以这里把分发失败存进变量，execute 返回后重新抛出。
   let updateFailure: ToolEventDispatchError | undefined;
   try {
     result = await prepared.tool.execute(
@@ -108,12 +110,17 @@ export async function executeReady(
         }
       },
     );
+    // 工具正常返回了，但曾经吞掉过分发失败 —— 补上这一抛。
     if (updateFailure) throw updateFailure;
   } catch (error) {
+    // 分发失败优先于一切其他错误抛出（控制面故障 > 工具自身故障）。
     if (updateFailure) throw updateFailure;
+    // 两类错误不当成工具结果：事件通道故障（控制面）和用户取消。
+    // 它们向上抛给批次协调器，由它统一走取消/失败流程。
     if (error instanceof ToolEventDispatchError || options.signal.aborted) {
       throw error;
     }
+    // 剩下的就是工具自身的普通异常：降级为错误结果反馈给模型。
     result = errorResult(error instanceof Error ? error.message : String(error));
   }
 

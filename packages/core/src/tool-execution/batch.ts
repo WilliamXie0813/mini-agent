@@ -121,12 +121,15 @@ export async function executeToolCallBatch(
           markTerminal,
         );
   } catch (error) {
+    // 批次失败（取消或控制面错误）：给“已 start 未 end”的调用补发
+    // cancelled 事件，让外部消费者看到的生命周期完整闭合。
     const reason = options.signal.aborted ? "aborted" : "control_error";
     try {
       await emitCancelledForOpenCalls(started, terminal, reason, events);
     } catch {
       // Preserve the original control error or abort reason.
     }
+    // 取消语义优先于错误语义：用户按了停止，就报取消而不是报错误。
     if (options.signal.aborted) options.signal.throwIfAborted();
     throw error;
   }

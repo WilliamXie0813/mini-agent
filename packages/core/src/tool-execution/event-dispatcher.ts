@@ -29,6 +29,9 @@ export class ToolEventDispatcher {
     try {
       await this.queue.enqueue(() => this.sink(event));
     } catch (error) {
+      // 包一层专属错误类型：下游（executeReady）靠 instanceof 区分
+      // “事件通道坏了”（属于控制面故障，要中止整个批次）和
+      // “工具自身抛错”（属于业务结果，反馈给模型即可）。
       throw error instanceof ToolEventDispatchError
         ? error
         : new ToolEventDispatchError(error);
