@@ -508,3 +508,58 @@ test("reset preserves pending and cancelled effect audit state", () => {
   assert.deepEqual(snapshot.pendingEffects, [pending]);
   assert.deepEqual(snapshot.cancelledEffects, [cancelled]);
 });
+
+test("replaySessionRecords does not mutate input records", () => {
+  const user = identifiedMessage("user-1", {
+    role: "user",
+    content: "hello",
+    timestamp: 1,
+  });
+  const records: SessionRecord[] = [
+    header(),
+    {
+      type: "commit",
+      sequence: 1,
+      timestamp: firstCommitAt,
+      operations: [{ type: "message", message: user }],
+    },
+  ];
+  const before = structuredClone(records);
+
+  replaySessionRecords(records);
+
+  assert.deepEqual(records, before);
+});
+
+test("operations inside one Commit are applied in recorded order", () => {
+  const queued = identifiedMessage("queued-1", {
+    role: "user",
+    content: "queued",
+    timestamp: 1,
+  });
+
+  assert.throws(
+    () =>
+      replaySessionRecords([
+        header(),
+        {
+          type: "commit",
+          sequence: 1,
+          timestamp: firstCommitAt,
+          operations: [
+            {
+              type: "queue_dequeued",
+              queue: "steering",
+              messageId: queued.id,
+            },
+            {
+              type: "queue_enqueued",
+              queue: "steering",
+              message: queued,
+            },
+          ],
+        },
+      ]),
+    /Queue message queued-1 is not enqueued in steering/,
+  );
+});
