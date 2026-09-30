@@ -36,6 +36,18 @@ function header(): SessionRecord {
   };
 }
 
+function effect(
+  toolCallId: string,
+  replay: "safe" | "never" = "never",
+): PendingEffect {
+  return {
+    toolCallId,
+    toolName: "read",
+    arguments: { path: "package.json" },
+    replay,
+  };
+}
+
 test("Session domain contracts are available from the package entrypoint", () => {
   const queue: QueueName = "steering";
   const value: JsonValue = { path: "package.json", lines: [1, 2] };
@@ -361,4 +373,138 @@ test("reset replaces messages and clears queues", () => {
   assert.deepEqual(snapshot.messages, [resetSystem]);
   assert.deepEqual(snapshot.steeringQueue, []);
   assert.deepEqual(snapshot.followUpQueue, []);
+});
+
+test("effect outcomes separate pending, finished, and cancelled calls", () => {
+  const pending = effect("call-pending", "never");
+  const finished = effect("call-finished", "safe");
+  const cancelled = effect("call-cancelled", "never");
+
+  const snapshot = replaySessionRecords([
+    header(),
+    {
+      type: "commit",
+      sequence: 1,
+      timestamp: firstCommitAt,
+      operations: [
+        { type: "effect_started", effect: pending },
+        { type: "effect_started", effect: finished },
+        { type: "effect_started", effect: cancelled },
+      ],
+    },
+    {
+      type: "commit",
+      sequence: 2,
+      timestamp: secondCommitAt,
+      operations: [
+        {
+          type: "effect_finished",
+          toolCallId: finished.toolCallId,
+        },
+        {
+          type: "effect_cancelled",
+          toolCallId: cancelled.toolCallId,
+        },
+      ],
+    },
+  ]);
+
+  assert.deepEqual(snapshot.pendingEffects, [pending]);
+  assert.deepEqual(snapshot.cancelledEffects, [cancelled]);
+  assert.deepEqual(
+    snapshot.recoveryWarnings.map((warning) => ({
+      kind: warning.kind,
+      toolCallId: warning.effect.toolCallId,
+    })),
+    [
+      { kind: "unknown", toolCallId: "call-pending" },
+      { kind: "cancelled", toolCallId: "call-cancelled" },
+    ],
+  );
+  assert.match(
+    snapshot.recoveryWarnings[0]?.message ?? "",
+    /call-pending.*outcome is unknown/,
+  );
+  assert.match(
+    snapshot.recoveryWarnings[1]?.message ?? "",
+    /call-cancelled.*was cancelled/,
+  );
+});
+
+test("effect operations require a single pending lifecycle", () => {
+  const started = effect("call-1");
+
+  assert.throws(
+    () =>
+      replaySessionRecords([
+        header(),
+        {
+          type: "commit",
+          sequence: 1,
+          timestamp: firstCommitAt,
+          operations: [
+            { type: "effect_started", effect: started },
+            { type: "effect_started", effect: started },
+          ],
+        },
+      ]),
+    /Tool effect already recorded: call-1/,
+  );
+
+  for (const operation of [
+    {
+      type: "effect_finished" as const,
+      toolCallId: "missing",
+    },
+    {
+      type: "effect_cancelled" as const,
+      toolCallId: "missing",
+    },
+  ]) {
+    assert.throws(
+      () =>
+        replaySessionRecords([
+          header(),
+          {
+            type: "commit",
+            sequence: 1,
+            timestamp: firstCommitAt,
+            operations: [operation],
+          },
+        ]),
+      /Pending Tool effect not found: missing/,
+    );
+  }
+});
+
+test("reset preserves pending and cancelled effect audit state", () => {
+  const pending = effect("call-pending");
+  const cancelled = effect("call-cancelled");
+  const resetSystem = identifiedMessage("reset-system", {
+    role: "system",
+    content: "new system",
+    timestamp: 3,
+  });
+
+  const snapshot = replaySessionRecords([
+    header(),
+    {
+      type: "commit",
+      sequence: 1,
+      timestamp: firstCommitAt,
+      operations: [
+        { type: "effect_started", effect: pending },
+        { type: "effect_started", effect: cancelled },
+        {
+          type: "effect_cancelled",
+          toolCallId: cancelled.toolCallId,
+        },
+        { type: "reset", systemMessage: resetSystem },
+      ],
+    },
+  ]);
+
+  assert.deepEqual(snapshot.messages, [resetSystem]);
+  assert.deepEqual(snapshot.pendingEffects, [pending]);
+  assert.deepEqual(snapshot.cancelledEffects, [cancelled]);
 });

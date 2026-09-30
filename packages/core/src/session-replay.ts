@@ -4,6 +4,7 @@ import type {
   QueueName,
   SessionMetadata,
   SessionRecord,
+  SessionRecoveryWarning,
   SessionSnapshot,
 } from "./session.ts";
 
@@ -97,11 +98,45 @@ function applyOperation(
       return;
     }
     case "effect_started":
-    case "effect_finished":
-    case "effect_cancelled":
-      throw new Error(
-        `Session operation is not supported by the current replay slice: ${operation.type}`,
+      if (
+        state.pendingEffects.has(operation.effect.toolCallId) ||
+        state.finishedEffectIds.has(operation.effect.toolCallId) ||
+        state.cancelledEffects.some(
+          (effect) =>
+            effect.toolCallId === operation.effect.toolCallId,
+        )
+      ) {
+        throw new Error(
+          `Tool effect already recorded: ${operation.effect.toolCallId}`,
+        );
+      }
+      state.pendingEffects.set(
+        operation.effect.toolCallId,
+        operation.effect,
       );
+      return;
+    case "effect_finished": {
+      const pending = state.pendingEffects.get(operation.toolCallId);
+      if (!pending) {
+        throw new Error(
+          `Pending Tool effect not found: ${operation.toolCallId}`,
+        );
+      }
+      state.pendingEffects.delete(operation.toolCallId);
+      state.finishedEffectIds.add(operation.toolCallId);
+      return;
+    }
+    case "effect_cancelled": {
+      const pending = state.pendingEffects.get(operation.toolCallId);
+      if (!pending) {
+        throw new Error(
+          `Pending Tool effect not found: ${operation.toolCallId}`,
+        );
+      }
+      state.pendingEffects.delete(operation.toolCallId);
+      state.cancelledEffects.push(pending);
+      return;
+    }
     case "reset":
       state.messages = [operation.systemMessage];
       state.steeringQueue = [];
@@ -110,15 +145,43 @@ function applyOperation(
   }
 }
 
+function unknownWarning(
+  effect: PendingEffect,
+): SessionRecoveryWarning {
+  return {
+    kind: "unknown",
+    effect,
+    message:
+      `Tool ${effect.toolName} (${effect.toolCallId}) started ` +
+      "before shutdown; outcome is unknown.",
+  };
+}
+
+function cancelledWarning(
+  effect: PendingEffect,
+): SessionRecoveryWarning {
+  return {
+    kind: "cancelled",
+    effect,
+    message:
+      `Tool ${effect.toolName} (${effect.toolCallId}) was cancelled ` +
+      "before producing a committed result.",
+  };
+}
+
 function createSnapshot(state: ReplayState): SessionSnapshot {
+  const pendingEffects = [...state.pendingEffects.values()];
   return {
     metadata: { ...state.metadata },
     messages: state.messages.slice(),
     steeringQueue: state.steeringQueue.slice(),
     followUpQueue: state.followUpQueue.slice(),
-    pendingEffects: [...state.pendingEffects.values()],
+    pendingEffects,
     cancelledEffects: state.cancelledEffects.slice(),
-    recoveryWarnings: [],
+    recoveryWarnings: [
+      ...pendingEffects.map(unknownWarning),
+      ...state.cancelledEffects.map(cancelledWarning),
+    ],
   };
 }
 
