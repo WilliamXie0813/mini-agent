@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { executeToolCallBatch } from "../src/tool-execution.ts";
+import { executeToolCallBatch } from "../src/tool-execution/index.ts";
 import type {
   AgentEvent,
   Tool,

@@ -23,7 +23,7 @@ import type {
   ToolCall,
   ToolResultMessage,
 } from "./types.ts";
-import { executeToolCallBatch } from "./tool-execution.ts";
+import { executeToolCallBatch } from "./tool-execution/index.ts";
 import { streamWithRetry } from "./retry.ts";
 
 function snapshotContext(context: AgentContext): AgentContextSnapshot {
