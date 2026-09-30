@@ -9,6 +9,7 @@ export { Agent } from "./agent.ts";
 export type { AgentOptions } from "./agent.ts";
 export { createMockStream } from "./mock-llm.ts";
 export { createReadTool } from "./tools.ts";
+export { editFile, readFile } from "./harness/tools/index.ts";
 export {
   createDeterministicCompactingTransform,
   createHeuristicTokenEstimator,
@@ -32,4 +33,8 @@ export type {
   SleepFn,
   StreamRetryOptions,
 } from "./retry.ts";
+export type {
+  EditFileParameters,
+  ReadFileParameters,
+} from "./harness/tools/index.ts";
 export * from "./types.ts";
