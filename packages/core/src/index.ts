@@ -47,4 +47,5 @@ export type {
   SessionRecoveryWarning,
   SessionSnapshot,
 } from "./session.ts";
+export { toJsonValue } from "./json-value.ts";
 export * from "./types.ts";
