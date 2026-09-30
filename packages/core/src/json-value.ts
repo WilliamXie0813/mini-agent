@@ -38,6 +38,30 @@ function convertJsonValue(
   ancestors.add(value);
   try {
     if (Array.isArray(value)) {
+      if (Object.getOwnPropertySymbols(value).length > 0) {
+        throw new Error(
+          `Symbol-keyed properties are not JSON-compatible at ${path}`,
+        );
+      }
+
+      for (const key of Object.getOwnPropertyNames(value)) {
+        if (key === "length") {
+          continue;
+        }
+
+        const index = Number(key);
+        if (
+          !Number.isInteger(index) ||
+          index < 0 ||
+          index >= value.length ||
+          String(index) !== key
+        ) {
+          throw new Error(
+            `Array property ${JSON.stringify(key)} at ${path} is not JSON-compatible`,
+          );
+        }
+      }
+
       const result: JsonValue[] = [];
       for (let index = 0; index < value.length; index += 1) {
         if (!(index in value)) {

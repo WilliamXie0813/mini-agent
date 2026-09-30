@@ -87,6 +87,30 @@ test("toJsonValue rejects symbol-keyed object properties", () => {
   );
 });
 
+test("toJsonValue rejects extra string-keyed array properties", () => {
+  const input: unknown[] & { label?: string } = [1, 2];
+  input.label = "hidden";
+
+  assert.throws(
+    () => toJsonValue(input),
+    /Array property "label" at \$ is not JSON-compatible/,
+  );
+});
+
+test("toJsonValue rejects symbol-keyed array properties", () => {
+  const key = Symbol("secret");
+  const input = [1, 2];
+  Object.defineProperty(input, key, {
+    enumerable: true,
+    value: "hidden",
+  });
+
+  assert.throws(
+    () => toJsonValue(input),
+    /Symbol-keyed properties are not JSON-compatible at \$/,
+  );
+});
+
 test("toJsonValue rejects sparse arrays", () => {
   const input = [1, 2];
   delete input[1];
