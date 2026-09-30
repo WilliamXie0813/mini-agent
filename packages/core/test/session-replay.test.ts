@@ -172,3 +172,193 @@ test("replaySessionRecords rejects gaps, duplicates, and backwards sequence", ()
     );
   }
 });
+
+test("replaySessionRecords rebuilds both queues in enqueue order", () => {
+  const steering = identifiedMessage("steering-1", {
+    role: "user",
+    content: "interrupt",
+    timestamp: 1,
+  });
+  const followUp = identifiedMessage("follow-up-1", {
+    role: "user",
+    content: "later",
+    timestamp: 2,
+  });
+
+  const snapshot = replaySessionRecords([
+    header(),
+    {
+      type: "commit",
+      sequence: 1,
+      timestamp: firstCommitAt,
+      operations: [
+        {
+          type: "queue_enqueued",
+          queue: "steering",
+          message: steering,
+        },
+        {
+          type: "queue_enqueued",
+          queue: "followUp",
+          message: followUp,
+        },
+      ],
+    },
+    {
+      type: "commit",
+      sequence: 2,
+      timestamp: secondCommitAt,
+      operations: [
+        {
+          type: "queue_dequeued",
+          queue: "steering",
+          messageId: steering.id,
+        },
+        {
+          type: "message",
+          message: steering,
+        },
+      ],
+    },
+  ]);
+
+  assert.deepEqual(snapshot.messages, [steering]);
+  assert.deepEqual(snapshot.steeringQueue, []);
+  assert.deepEqual(snapshot.followUpQueue, [followUp]);
+});
+
+test("queue dequeue can pair with a message in the same Commit", () => {
+  const queued = identifiedMessage("queued-1", {
+    role: "user",
+    content: "queued",
+    timestamp: 1,
+  });
+
+  const snapshot = replaySessionRecords([
+    header(),
+    {
+      type: "commit",
+      sequence: 1,
+      timestamp: firstCommitAt,
+      operations: [
+        {
+          type: "queue_enqueued",
+          queue: "followUp",
+          message: queued,
+        },
+      ],
+    },
+    {
+      type: "commit",
+      sequence: 2,
+      timestamp: secondCommitAt,
+      operations: [
+        {
+          type: "queue_dequeued",
+          queue: "followUp",
+          messageId: queued.id,
+        },
+        { type: "message", message: queued },
+      ],
+    },
+  ]);
+
+  assert.deepEqual(snapshot.followUpQueue, []);
+  assert.deepEqual(snapshot.messages, [queued]);
+});
+
+test("queue operations reject duplicate and missing identities", () => {
+  const queued = identifiedMessage("queued-1", {
+    role: "user",
+    content: "queued",
+    timestamp: 1,
+  });
+
+  assert.throws(
+    () =>
+      replaySessionRecords([
+        header(),
+        {
+          type: "commit",
+          sequence: 1,
+          timestamp: firstCommitAt,
+          operations: [
+            {
+              type: "queue_enqueued",
+              queue: "steering",
+              message: queued,
+            },
+            {
+              type: "queue_enqueued",
+              queue: "followUp",
+              message: queued,
+            },
+          ],
+        },
+      ]),
+    /Queue message already enqueued: queued-1/,
+  );
+
+  assert.throws(
+    () =>
+      replaySessionRecords([
+        header(),
+        {
+          type: "commit",
+          sequence: 1,
+          timestamp: firstCommitAt,
+          operations: [
+            {
+              type: "queue_dequeued",
+              queue: "steering",
+              messageId: "missing",
+            },
+          ],
+        },
+      ]),
+    /Queue message missing is not enqueued in steering/,
+  );
+});
+
+test("reset replaces messages and clears queues", () => {
+  const oldMessage = identifiedMessage("old-user", {
+    role: "user",
+    content: "old",
+    timestamp: 1,
+  });
+  const queued = identifiedMessage("queued-user", {
+    role: "user",
+    content: "queued",
+    timestamp: 2,
+  });
+  const resetSystem = identifiedMessage("reset-system", {
+    role: "system",
+    content: "new system",
+    timestamp: 3,
+  });
+
+  const snapshot = replaySessionRecords([
+    header(),
+    {
+      type: "commit",
+      sequence: 1,
+      timestamp: firstCommitAt,
+      operations: [
+        { type: "message", message: oldMessage },
+        {
+          type: "queue_enqueued",
+          queue: "steering",
+          message: queued,
+        },
+        {
+          type: "reset",
+          systemMessage: resetSystem,
+        },
+      ],
+    },
+  ]);
+
+  assert.deepEqual(snapshot.messages, [resetSystem]);
+  assert.deepEqual(snapshot.steeringQueue, []);
+  assert.deepEqual(snapshot.followUpQueue, []);
+});

@@ -1,6 +1,7 @@
 import type { AgentMessage } from "./types.ts";
 import type {
   PendingEffect,
+  QueueName,
   SessionMetadata,
   SessionRecord,
   SessionSnapshot,
@@ -33,6 +34,35 @@ function createReplayState(
   };
 }
 
+function queueFor(
+  state: ReplayState,
+  queue: QueueName,
+): AgentMessage[] {
+  return queue === "steering"
+    ? state.steeringQueue
+    : state.followUpQueue;
+}
+
+function findQueuedMessage(
+  state: ReplayState,
+  messageId: string,
+): { queue: QueueName; index: number } | undefined {
+  const steeringIndex = state.steeringQueue.findIndex(
+    (message) => message.id === messageId,
+  );
+  if (steeringIndex >= 0) {
+    return { queue: "steering", index: steeringIndex };
+  }
+
+  const followUpIndex = state.followUpQueue.findIndex(
+    (message) => message.id === messageId,
+  );
+  if (followUpIndex >= 0) {
+    return { queue: "followUp", index: followUpIndex };
+  }
+  return undefined;
+}
+
 function applyOperation(
   state: ReplayState,
   operation: Extract<
@@ -44,15 +74,39 @@ function applyOperation(
     case "message":
       state.messages.push(operation.message);
       return;
-    case "queue_enqueued":
-    case "queue_dequeued":
+    case "queue_enqueued": {
+      if (findQueuedMessage(state, operation.message.id)) {
+        throw new Error(
+          `Queue message already enqueued: ${operation.message.id}`,
+        );
+      }
+      queueFor(state, operation.queue).push(operation.message);
+      return;
+    }
+    case "queue_dequeued": {
+      const queue = queueFor(state, operation.queue);
+      const index = queue.findIndex(
+        (message) => message.id === operation.messageId,
+      );
+      if (index < 0) {
+        throw new Error(
+          `Queue message ${operation.messageId} is not enqueued in ${operation.queue}`,
+        );
+      }
+      queue.splice(index, 1);
+      return;
+    }
     case "effect_started":
     case "effect_finished":
     case "effect_cancelled":
-    case "reset":
       throw new Error(
         `Session operation is not supported by the current replay slice: ${operation.type}`,
       );
+    case "reset":
+      state.messages = [operation.systemMessage];
+      state.steeringQueue = [];
+      state.followUpQueue = [];
+      return;
   }
 }
 
