@@ -200,6 +200,11 @@ function createCompactionMessage(
   segmentMessages: readonly AgentMessage[],
   maxExcerptCharacters: number,
 ): AgentMessage {
+  const firstMessage = segmentMessages[0];
+  const lastMessage = segmentMessages.at(-1);
+  if (!firstMessage || !lastMessage) {
+    throw new Error("Cannot compact an empty message segment");
+  }
   const users = segmentMessages.filter((message) => message.role === "user");
   const assistants = segmentMessages.filter(
     (message) => message.role === "assistant",
@@ -246,6 +251,7 @@ function createCompactionMessage(
     );
   }
   return {
+    id: `context-summary:${firstMessage.id}:${lastMessage.id}`,
     role: "system",
     content: [
       "[Earlier context compacted]",
@@ -258,7 +264,7 @@ function createCompactionMessage(
       "Recent excerpts:",
       ...excerpts,
     ].join("\n"),
-    timestamp: segmentMessages.at(-1)?.timestamp ?? 0,
+    timestamp: lastMessage.timestamp,
   };
 }
 

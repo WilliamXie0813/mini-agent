@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { AssistantMessage } from "@mini-agent/core";
 import { ChatPanel } from "../src/components/ChatPanel";
 import { emptyState } from "../src/state/reducer";
+import { identifiedMessage } from "./helpers/messages";
 
 describe("ChatPanel", () => {
   it("shows a welcome panel with example prompts when there are no messages", () => {
@@ -28,8 +29,12 @@ describe("ChatPanel", () => {
     const state = {
       ...emptyState(),
       messages: [
-        { role: "user" as const, content: "读取 package.json", timestamp: 1 },
-        {
+        identifiedMessage("chat-user", {
+          role: "user" as const,
+          content: "读取 package.json",
+          timestamp: 1,
+        }),
+        identifiedMessage("chat-assistant", {
           role: "assistant" as const,
           content: [
             {
@@ -41,15 +46,15 @@ describe("ChatPanel", () => {
           ],
           stopReason: "toolUse" as const,
           timestamp: 2,
-        },
-        {
+        }),
+        identifiedMessage("chat-tool-result", {
           role: "toolResult" as const,
           toolCallId: "call-1",
           toolName: "read",
           content: "{\"name\":\"mock-agent-demo\"}",
           isError: false,
           timestamp: 3,
-        },
+        }),
       ],
       pendingToolCalls: ["call-1"],
     };
@@ -61,19 +66,19 @@ describe("ChatPanel", () => {
   });
 
   it("renders the streaming message with a cursor", () => {
-    const streaming: AssistantMessage = {
+    const streaming: AssistantMessage = identifiedMessage("streaming-text", {
       role: "assistant",
       content: [{ type: "text", text: "正在回答" }],
       stopReason: "stop",
       timestamp: 1,
-    };
+    });
     render(<ChatPanel state={{ ...emptyState(), streamingMessage: streaming }} />);
     expect(screen.getByText(/正在回答/)).toBeInTheDocument();
     expect(screen.getByText("▍")).toBeInTheDocument();
   });
 
   it("keeps the cursor when the last streaming part is a toolCall", () => {
-    const streaming: AssistantMessage = {
+    const streaming: AssistantMessage = identifiedMessage("streaming-tool", {
       role: "assistant",
       content: [
         { type: "text", text: "好" },
@@ -81,7 +86,7 @@ describe("ChatPanel", () => {
       ],
       stopReason: "toolUse",
       timestamp: 1,
-    };
+    });
     render(
       <ChatPanel
         state={{ ...emptyState(), streamingMessage: streaming, pendingToolCalls: ["c1"] }}

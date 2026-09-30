@@ -8,11 +8,13 @@ import type {
 	AfterToolCall,
 	BeforeToolCall,
 	EventSink,
+	IdGenerator,
 	Tool,
 	ToolCall,
 	ToolExecutionMode,
 	ToolResultMessage,
 } from "../types.ts";
+import { defaultIdGenerator, generateMessageId } from "../id.ts";
 import { ToolEventDispatcher } from "./event-dispatcher.ts";
 import type { CompletedToolCall } from "./execute-call.ts";
 import { prepareToolCalls } from "./prepare.ts";
@@ -30,6 +32,7 @@ export interface ToolExecutionBatchOptions {
 	tools: readonly Tool<unknown>[];
 	toolExecutionMode: ToolExecutionMode;
 	maxConcurrency: number;
+	idGenerator?: IdGenerator;
 	beforeToolCall?: BeforeToolCall;
 	afterToolCall?: AfterToolCall;
 	emit: EventSink;
@@ -44,8 +47,12 @@ export type MarkStarted = (toolCall: ToolCall) => void;
 export type MarkTerminal = (toolCallId: string) => void;
 
 /** 将内部完成记录转换成下一轮模型可见的 Tool Result Message。 */
-function toMessage(completed: CompletedToolCall): ToolResultMessage {
+function toMessage(
+	completed: CompletedToolCall,
+	idGenerator: IdGenerator,
+): ToolResultMessage {
 	return {
+		id: generateMessageId(idGenerator),
 		role: "toolResult",
 		toolCallId: completed.toolCall.id,
 		toolName: completed.toolCall.name,
@@ -88,6 +95,7 @@ export async function executeToolCallBatch(
 	options: ToolExecutionBatchOptions,
 ): Promise<ToolExecutionBatch> {
 	if (toolCalls.length === 0) return { messages: [] };
+	const idGenerator = options.idGenerator ?? defaultIdGenerator;
 
 	// 第 1 步：预检。按模型源顺序把每个调用分成 ready（待真实执行）和
 	// immediate（直接合成错误结果）。此阶段不产生任何工具副作用，
@@ -148,5 +156,7 @@ export async function executeToolCallBatch(
 	// 第 4 步：按 index 恢复模型源顺序（并行会打乱完成顺序），
 	// 再把内部完成记录转成下一轮模型可见的 ToolResultMessage。
 	completed.sort((left, right) => left.index - right.index);
-	return { messages: completed.map(toMessage) };
+	return {
+		messages: completed.map((item) => toMessage(item, idGenerator)),
+	};
 }

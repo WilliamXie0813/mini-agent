@@ -13,9 +13,11 @@
  *
  * 关键约束（设计文档明确要求）：Mock LLM 从不执行工具，也从不修改 Agent 状态。
  */
+import { defaultIdGenerator, generateMessageId } from "./id.ts";
 import type {
   AgentMessage,
   AssistantMessage,
+  IdGenerator,
   ModelStreamEvent,
   StreamFn,
   ToolResultMessage,
@@ -85,11 +87,13 @@ async function wait(delayMs: number, signal: AbortSignal): Promise<void> {
  * 每个字符之间插入可中止的延迟，模拟真实模型的流式输出节奏。
  */
 async function* streamText(
+  id: string,
   text: string,
   signal: AbortSignal,
   delayMs: number,
 ): AsyncGenerator<ModelStreamEvent> {
   let message: AssistantMessage = {
+    id,
     role: "assistant",
     content: [{ type: "text", text: "" }],
     stopReason: "stop",
@@ -115,8 +119,14 @@ async function* streamText(
  * 创建一个 Mock 模型的 StreamFn。
  * delayMs 控制流式速度（demo 里设为 10ms 便于肉眼观察流式效果；测试里为 0 追求速度）。
  */
-export function createMockStream(options: { delayMs?: number } = {}): StreamFn {
+export function createMockStream(
+  options: {
+    delayMs?: number;
+    idGenerator?: IdGenerator;
+  } = {},
+): StreamFn {
   const delayMs = options.delayMs ?? 0;
+  const idGenerator = options.idGenerator ?? defaultIdGenerator;
 
   return async function* mockStream(messages, signal) {
     signal.throwIfAborted();
@@ -127,6 +137,7 @@ export function createMockStream(options: { delayMs?: number } = {}): StreamFn {
     if (lastMessage?.role === "toolResult") {
       if (lastMessage.isError) {
         yield* streamText(
+          generateMessageId(idGenerator),
           `工具执行失败：${lastMessage.content}`,
           signal,
           delayMs,
@@ -136,6 +147,7 @@ export function createMockStream(options: { delayMs?: number } = {}): StreamFn {
 
       const packageData = parsePackage(lastMessage);
       yield* streamText(
+        generateMessageId(idGenerator),
         packageData.name
           ? `项目名称是 ${packageData.name}。`
           : "package.json 中没有有效的 name。",
@@ -152,6 +164,7 @@ export function createMockStream(options: { delayMs?: number } = {}): StreamFn {
     ) {
       const packageData = readResult ? parsePackage(readResult) : {};
       yield* streamText(
+        generateMessageId(idGenerator),
         packageData.name ?? "当前上下文中没有项目名称。",
         signal,
         delayMs,
@@ -163,6 +176,7 @@ export function createMockStream(options: { delayMs?: number } = {}): StreamFn {
     if (lastMessage?.role === "user" && lastMessage.content.includes("版本号")) {
       const packageData = readResult ? parsePackage(readResult) : {};
       yield* streamText(
+        generateMessageId(idGenerator),
         packageData.version
           ? `项目版本是 ${packageData.version}。`
           : "当前上下文中没有项目版本信息。",
@@ -184,6 +198,7 @@ export function createMockStream(options: { delayMs?: number } = {}): StreamFn {
         arguments: { path: "package.json" },
       };
       const startMessage: AssistantMessage = {
+        id: generateMessageId(idGenerator),
         role: "assistant",
         content: [],
         stopReason: "toolUse", // 注意：stopReason 是 toolUse，告诉循环“我还有工具要跑”
@@ -201,6 +216,7 @@ export function createMockStream(options: { delayMs?: number } = {}): StreamFn {
 
     // 兜底：复述用户消息（steering 等未识别的输入会走到这里）
     yield* streamText(
+      generateMessageId(idGenerator),
       lastMessage?.role === "user"
         ? `你说的是：${lastMessage.content}`
         : "没有可处理的用户消息。",

@@ -2,13 +2,20 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createMockStream } from "../src/mock-llm.ts";
 import type { AgentMessage, ModelStreamEvent } from "../src/types.ts";
+import {
+  createTestIdGenerator,
+  identifiedMessage,
+} from "./helpers/messages.ts";
 
 async function collect(
   messages: AgentMessage[],
   signal = new AbortController().signal,
 ): Promise<ModelStreamEvent[]> {
   const events: ModelStreamEvent[] = [];
-  for await (const event of createMockStream()(messages, signal)) {
+  const stream = createMockStream({
+    idGenerator: createTestIdGenerator("mock"),
+  });
+  for await (const event of stream(messages, signal)) {
     events.push(event);
   }
   return events;
@@ -16,11 +23,11 @@ async function collect(
 
 test("mock model requests package.json when no read result exists", async () => {
   const events = await collect([
-    {
+    identifiedMessage("user-package-request", {
       role: "user",
       content: "读取 package.json，并告诉我项目名称。",
       timestamp: 1,
-    },
+    }),
   ]);
 
   const toolEvent = events.find((event) => event.type === "tool_call");
@@ -31,19 +38,19 @@ test("mock model requests package.json when no read result exists", async () => 
 
 test("mock model answers from a read tool result", async () => {
   const events = await collect([
-    {
+    identifiedMessage("user-package-request", {
       role: "user",
       content: "读取 package.json，并告诉我项目名称。",
       timestamp: 1,
-    },
-    {
+    }),
+    identifiedMessage("tool-result-package", {
       role: "toolResult",
       toolCallId: "call-read-package",
       toolName: "read",
       content: "{\"name\":\"mock-agent-demo\",\"version\":\"1.0.0\"}",
       isError: false,
       timestamp: 2,
-    },
+    }),
   ]);
 
   const end = events.at(-1);
@@ -57,19 +64,19 @@ test("mock model answers from a read tool result", async () => {
 
 test("mock model answers a version follow-up from existing tool history", async () => {
   const events = await collect([
-    {
+    identifiedMessage("tool-result-package", {
       role: "toolResult",
       toolCallId: "call-read-package",
       toolName: "read",
       content: "{\"name\":\"mock-agent-demo\",\"version\":\"1.0.0\"}",
       isError: false,
       timestamp: 1,
-    },
-    {
+    }),
+    identifiedMessage("user-version-follow-up", {
       role: "user",
       content: "再告诉我版本号。",
       timestamp: 2,
-    },
+    }),
   ]);
 
   const end = events.at(-1);

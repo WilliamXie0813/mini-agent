@@ -42,6 +42,7 @@ function createNamedToolCallStream(names: readonly string[]): StreamFn {
   return async function* (messages) {
     if (messages.at(-1)?.role === "toolResult") {
       const done: AssistantMessage = {
+        id: "named-tool-done",
         role: "assistant",
         content: [{ type: "text", text: "done" }],
         stopReason: "stop",
@@ -59,6 +60,7 @@ function createNamedToolCallStream(names: readonly string[]): StreamFn {
       arguments: {},
     }));
     const start: AssistantMessage = {
+      id: "named-tool-request",
       role: "assistant",
       content: [],
       stopReason: "toolUse",
@@ -278,6 +280,7 @@ test("Agent finally clears pending state when a listener fails", async () => {
 test("continue resumes from an existing user tail without duplicating it", async () => {
   const agent = createAgent();
   agent.state.messages.push({
+    id: "existing-user-tail",
     role: "user",
     content: "读取 package.json，并告诉我项目名称。",
     timestamp: 1,
@@ -300,6 +303,7 @@ test("continue resumes from an existing user tail without duplicating it", async
 test("continue resumes directly from a tool-result tail", async () => {
   const agent = createAgent();
   agent.state.messages.push({
+    id: "existing-tool-result-tail",
     role: "toolResult",
     toolCallId: "call-read-package",
     toolName: "read",
@@ -355,6 +359,7 @@ test("abort stops a cooperative long-running tool", async () => {
     const last = messages.at(-1);
     if (last?.role === "toolResult") {
       const message = {
+        id: "long-tool-finished",
         role: "assistant" as const,
         content: [{ type: "text" as const, text: "finished" }],
         stopReason: "stop" as const,
@@ -372,6 +377,7 @@ test("abort stops a cooperative long-running tool", async () => {
       arguments: {},
     };
     const start = {
+      id: "long-tool-request",
       role: "assistant" as const,
       content: [],
       stopReason: "toolUse" as const,
@@ -439,6 +445,7 @@ test("model failure becomes an error Assistant message", async () => {
       stream: async function* (messages) {
         requests.push(messages.slice());
         const message = {
+          id: "prepared-request-answer",
           role: "assistant" as const,
           content: [{ type: "text" as const, text: "done" }],
           stopReason: "stop" as const,
@@ -561,6 +568,7 @@ test("Agent retries a pre-event failure without duplicate Assistant messages", a
         throw new ModelError("network", "offline");
       }
       const message: AssistantMessage = {
+        id: "retry-recovered",
         role: "assistant",
         content: [{ type: "text", text: "recovered" }],
         stopReason: "stop",
@@ -645,6 +653,7 @@ test("Agent converts an incomplete non-retried stream into an error message", as
       yield {
         type: "start",
         message: {
+          id: "incomplete-stream",
           role: "assistant",
           content: [],
           stopReason: "stop",

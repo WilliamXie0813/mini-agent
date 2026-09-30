@@ -7,6 +7,7 @@ import type {
   ToolCall,
   ToolExecutionResult,
 } from "../src/types.ts";
+import { createTestIdGenerator } from "./helpers/messages.ts";
 
 function toolCall(id: string, name = id): ToolCall {
   return { type: "toolCall", id, name, arguments: { id } };
@@ -175,6 +176,27 @@ test("afterToolCall is applied before end and message creation", async () => {
   if (end?.type !== "tool_execution_end") return;
   assert.equal(end.result.content, "replacement");
   assert.equal(batch.messages[0]?.content, "replacement");
+});
+
+test("tool result messages use the injected id generator in source order", async () => {
+  const batch = await executeToolCallBatch(
+    [toolCall("a", "missing"), toolCall("b", "missing")],
+    {
+      ...options(),
+      idGenerator: createTestIdGenerator("result"),
+    },
+  );
+
+  assert.deepEqual(
+    batch.messages.map((message) => ({
+      id: message.id,
+      toolCallId: message.toolCallId,
+    })),
+    [
+      { id: "result-1", toolCallId: "a" },
+      { id: "result-2", toolCallId: "b" },
+    ],
+  );
 });
 
 test("parallel mode starts safe tools before either completes", async () => {

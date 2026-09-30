@@ -15,6 +15,7 @@ import type {
   AssistantMessage,
   ModelStreamEvent,
 } from "../src/types.ts";
+import { identifiedMessage } from "./helpers/messages.ts";
 import type { SleepFn } from "../src/retry.ts";
 
 test("model error codes have one default retryability source", () => {
@@ -197,12 +198,12 @@ test("default policy validates options", () => {
 });
 
 function assistant(text: string): AssistantMessage {
-  return {
+  return identifiedMessage("retry-assistant", {
     role: "assistant",
     content: text ? [{ type: "text", text }] : [],
     stopReason: "stop",
     timestamp: 1,
-  };
+  });
 }
 
 async function collectRetryStream(options: {

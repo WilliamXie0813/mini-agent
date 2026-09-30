@@ -13,11 +13,14 @@
 import type { ModelErrorCode } from "./errors.ts";
 import type { RetryPolicy, SleepFn } from "./retry.ts";
 
+export type IdGenerator = () => string;
+
 /** 一条 assistant 消息为什么停下：正常结束 / 请求调工具 / 出错 / 被中止 */
 export type StopReason = "stop" | "toolUse" | "error" | "aborted";
 
 /** 系统提示词，始终位于消息历史开头 */
 export interface SystemMessage {
+  id: string;
   role: "system";
   content: string;
   timestamp: number;
@@ -25,6 +28,7 @@ export interface SystemMessage {
 
 /** 用户输入（包括正常 prompt、steer 插队消息、followUp 追加消息） */
 export interface UserMessage {
+  id: string;
   role: "user";
   content: string;
   timestamp: number;
@@ -50,6 +54,7 @@ export interface ToolCall {
  * "error" / "aborted" 时 errorMessage 携带原因。
  */
 export interface AssistantMessage {
+  id: string;
   role: "assistant";
   content: Array<TextContent | ToolCall>;
   stopReason: StopReason;
@@ -59,6 +64,7 @@ export interface AssistantMessage {
 
 /** 工具执行完毕后的结果消息，通过 toolCallId 与 assistant 的 ToolCall 配对 */
 export interface ToolResultMessage {
+  id: string;
   role: "toolResult";
   toolCallId: string;
   toolName: string;
@@ -325,6 +331,7 @@ export type FinishTurn = (
  */
 export interface AgentLoopConfig {
   stream: StreamFn;
+  idGenerator: IdGenerator;
   retryPolicy?: RetryPolicy;
   sleep?: SleepFn;
   getSteeringMessages(): AgentMessage[];

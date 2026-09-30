@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ServerMessage } from "@mini-agent/server";
 import { AgentClient, type WebSocketLike } from "../src/state/client";
+import { identifiedMessage } from "./helpers/messages";
 
 class FakeSocket implements WebSocketLike {
   readonly sent: string[] = [];
@@ -68,7 +69,13 @@ describe("AgentClient", () => {
     socket.receive({
       type: "state",
       state: {
-        messages: [{ role: "system", content: "s", timestamp: 1 }],
+        messages: [
+          identifiedMessage("client-system", {
+            role: "system",
+            content: "s",
+            timestamp: 1,
+          }),
+        ],
         isStreaming: false,
         pendingToolCalls: [],
         queues: { steering: [], followUp: [] },

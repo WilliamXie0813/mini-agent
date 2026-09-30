@@ -23,6 +23,7 @@ import type {
   ToolCall,
   ToolResultMessage,
 } from "./types.ts";
+import { validateMessageId } from "./id.ts";
 import { executeToolCallBatch } from "./tool-execution/index.ts";
 import { streamWithRetry } from "./retry.ts";
 
@@ -72,6 +73,7 @@ async function streamAssistantResponse(
   signal: AbortSignal,
 ): Promise<AssistantMessage> {
   let finalMessage: AssistantMessage | undefined;
+  let assistantMessageId: string | undefined;
   signal.throwIfAborted();
   // prepareRequest 可以同步权威历史，因此它修改的是本 Run 的工作上下文。
   applyPreparation(
@@ -99,6 +101,12 @@ async function streamAssistantResponse(
 
   let receivedEnd = false;
   for await (const modelEvent of stream) {
+    const messageId = validateMessageId(modelEvent.message.id);
+    if (assistantMessageId === undefined) {
+      assistantMessageId = messageId;
+    } else if (messageId !== assistantMessageId) {
+      throw new Error("Model stream changed Assistant message ID");
+    }
     if (modelEvent.type === "end") receivedEnd = true;
     finalMessage = modelEvent.message;
 
@@ -205,6 +213,7 @@ export async function runAgentLoop(
       tools: context.tools,
       toolExecutionMode: config.toolExecutionMode,
       maxConcurrency: config.maxToolConcurrency,
+      idGenerator: config.idGenerator,
       beforeToolCall: config.beforeToolCall,
       afterToolCall: config.afterToolCall,
       emit,

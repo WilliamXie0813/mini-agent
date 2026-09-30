@@ -1,13 +1,14 @@
 import { describe, expect, it } from "vitest";
 import type { AssistantMessage } from "@mini-agent/core";
 import { emptyState, reduceEvent } from "../src/state/reducer";
+import { identifiedMessage } from "./helpers/messages";
 
-const assistantMessage: AssistantMessage = {
+const assistantMessage: AssistantMessage = identifiedMessage("reducer-assistant", {
   role: "assistant",
   content: [{ type: "text", text: "你好" }],
   stopReason: "stop",
   timestamp: 1,
-};
+});
 
 describe("reduceEvent", () => {
   it("tracks the streaming assistant message and appends it on message_end", () => {
@@ -22,7 +23,11 @@ describe("reduceEvent", () => {
   });
 
   it("ignores message_start/update for non-assistant messages", () => {
-    const user = { role: "user" as const, content: "hi", timestamp: 1 };
+    const user = identifiedMessage("reducer-user", {
+      role: "user" as const,
+      content: "hi",
+      timestamp: 1,
+    });
     const state = reduceEvent(emptyState(), {
       type: "message_start",
       message: user,

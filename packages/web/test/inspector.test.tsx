@@ -2,6 +2,7 @@ import { render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { InspectorPanel } from "../src/components/InspectorPanel";
 import { emptyState } from "../src/state/reducer";
+import { identifiedMessage } from "./helpers/messages";
 
 describe("InspectorPanel", () => {
   it("renders the three tabs", () => {
@@ -15,7 +16,13 @@ describe("InspectorPanel", () => {
     const state = {
       ...emptyState(),
       queues: {
-        steering: [{ role: "user" as const, content: "排队中的消息", timestamp: 1 }],
+        steering: [
+          identifiedMessage("inspector-queued-user", {
+            role: "user" as const,
+            content: "排队中的消息",
+            timestamp: 1,
+          }),
+        ],
         followUp: [],
       },
     };

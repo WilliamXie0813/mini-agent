@@ -14,6 +14,7 @@ import type {
   TokenEstimator,
   TransformContext,
 } from "../src/index.ts";
+import { identifiedMessage } from "./helpers/messages.ts";
 
 test("context pipeline contracts are publicly available", () => {
   const snapshot: AgentContextSnapshot = {
@@ -45,21 +46,33 @@ function messageCountEstimator(): TokenEstimator {
 
 test("compacting transform replaces old turns and preserves recent turns", async () => {
   const messages: AgentMessage[] = [
-    { role: "system", content: "system", timestamp: 1 },
-    { role: "user", content: "old user", timestamp: 2 },
-    {
+    identifiedMessage("system-root", {
+      role: "system",
+      content: "system",
+      timestamp: 1,
+    }),
+    identifiedMessage("old-user", {
+      role: "user",
+      content: "old user",
+      timestamp: 2,
+    }),
+    identifiedMessage("old-assistant", {
       role: "assistant",
       content: [{ type: "text", text: "old answer" }],
       stopReason: "stop",
       timestamp: 3,
-    },
-    { role: "user", content: "recent user", timestamp: 4 },
-    {
+    }),
+    identifiedMessage("recent-user", {
+      role: "user",
+      content: "recent user",
+      timestamp: 4,
+    }),
+    identifiedMessage("recent-assistant", {
       role: "assistant",
       content: [{ type: "text", text: "recent answer" }],
       stopReason: "stop",
       timestamp: 5,
-    },
+    }),
   ];
   const transform = createDeterministicCompactingTransform({
     maxInputTokens: 4,
@@ -71,6 +84,12 @@ test("compacting transform replaces old turns and preserves recent turns", async
     result.map((message) => message.role),
     ["system", "system", "user", "assistant"],
   );
+  assert.equal(
+    result[1]?.id,
+    "context-summary:old-user:old-assistant",
+  );
+  const repeated = await transform(messages, new AbortController().signal);
+  assert.equal(repeated[1]?.id, result[1]?.id);
   assert.match(
     result[1]?.role === "system" ? result[1].content : "",
     /Users: 1[\s\S]*Assistants: 1/,
@@ -79,23 +98,43 @@ test("compacting transform replaces old turns and preserves recent turns", async
 
 test("system messages split compacted segments without moving", async () => {
   const messages: AgentMessage[] = [
-    { role: "system", content: "initial", timestamp: 1 },
-    { role: "user", content: "before", timestamp: 2 },
-    {
+    identifiedMessage("initial-system", {
+      role: "system",
+      content: "initial",
+      timestamp: 1,
+    }),
+    identifiedMessage("before-user", {
+      role: "user",
+      content: "before",
+      timestamp: 2,
+    }),
+    identifiedMessage("before-assistant", {
       role: "assistant",
       content: [{ type: "text", text: "answer" }],
       stopReason: "stop",
       timestamp: 3,
-    },
-    { role: "system", content: "update", timestamp: 4 },
-    { role: "user", content: "after", timestamp: 5 },
-    {
+    }),
+    identifiedMessage("update-system", {
+      role: "system",
+      content: "update",
+      timestamp: 4,
+    }),
+    identifiedMessage("after-user", {
+      role: "user",
+      content: "after",
+      timestamp: 5,
+    }),
+    identifiedMessage("after-assistant", {
       role: "assistant",
       content: [{ type: "text", text: "answer" }],
       stopReason: "stop",
       timestamp: 6,
-    },
-    { role: "user", content: "tail", timestamp: 7 },
+    }),
+    identifiedMessage("tail-user", {
+      role: "user",
+      content: "tail",
+      timestamp: 7,
+    }),
   ];
   const transform = createDeterministicCompactingTransform({
     maxInputTokens: 5,
@@ -119,8 +158,12 @@ test("system messages split compacted segments without moving", async () => {
 
 test("compaction reports tools and rejects impossible budgets", async () => {
   const messages: AgentMessage[] = [
-    { role: "user", content: "old", timestamp: 1 },
-    {
+    identifiedMessage("old-user", {
+      role: "user",
+      content: "old",
+      timestamp: 1,
+    }),
+    identifiedMessage("tool-request", {
       role: "assistant",
       content: [
         {
@@ -132,16 +175,20 @@ test("compaction reports tools and rejects impossible budgets", async () => {
       ],
       stopReason: "toolUse",
       timestamp: 2,
-    },
-    {
+    }),
+    identifiedMessage("missing-result", {
       role: "toolResult",
       toolCallId: "call",
       toolName: "read",
       content: "missing",
       isError: true,
       timestamp: 3,
-    },
-    { role: "user", content: "tail", timestamp: 4 },
+    }),
+    identifiedMessage("tail-user", {
+      role: "user",
+      content: "tail",
+      timestamp: 4,
+    }),
   ];
   const transform = createDeterministicCompactingTransform({
     maxInputTokens: 2,
@@ -170,8 +217,16 @@ test("compaction reports tools and rejects impossible budgets", async () => {
 test("heuristic estimator counts natural text and message overhead", () => {
   const estimator = createHeuristicTokenEstimator();
   const messages: AgentMessage[] = [
-    { role: "system", content: "你好ab", timestamp: 1 },
-    { role: "user", content: "abcdefgh", timestamp: 2 },
+    identifiedMessage("estimator-system", {
+      role: "system",
+      content: "你好ab",
+      timestamp: 1,
+    }),
+    identifiedMessage("estimator-user", {
+      role: "user",
+      content: "abcdefgh",
+      timestamp: 2,
+    }),
   ];
   assert.equal(estimator.estimate(messages), 13);
 });
@@ -179,7 +234,7 @@ test("heuristic estimator counts natural text and message overhead", () => {
 test("heuristic estimator serializes tool data with sorted keys", () => {
   const estimator = createHeuristicTokenEstimator();
   const createMessages = (argumentsValue: unknown): AgentMessage[] => [
-    {
+    identifiedMessage("estimator-tool-request", {
       role: "assistant",
       content: [
         {
@@ -191,7 +246,7 @@ test("heuristic estimator serializes tool data with sorted keys", () => {
       ],
       stopReason: "toolUse",
       timestamp: 1,
-    },
+    }),
   ];
   assert.equal(
     estimator.estimate(createMessages({ z: 1, a: 2 })),
@@ -204,7 +259,7 @@ test("heuristic estimator rejects circular values and bigint", () => {
   const circular: Record<string, unknown> = {};
   circular.self = circular;
   const createMessages = (argumentsValue: unknown): AgentMessage[] => [
-    {
+    identifiedMessage("invalid-tool-request", {
       role: "assistant",
       content: [
         {
@@ -216,7 +271,7 @@ test("heuristic estimator rejects circular values and bigint", () => {
       ],
       stopReason: "toolUse",
       timestamp: 1,
-    },
+    }),
   ];
   assert.throws(
     () => estimator.estimate(createMessages(circular)),

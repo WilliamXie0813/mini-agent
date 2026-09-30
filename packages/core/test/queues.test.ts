@@ -3,6 +3,7 @@ import test from "node:test";
 import { Agent } from "../src/agent.ts";
 import { createMockStream } from "../src/mock-llm.ts";
 import type { AgentMessage } from "../src/types.ts";
+import { identifiedMessage } from "./helpers/messages.ts";
 
 test("queuedMessages exposes queued steering and followUp messages", () => {
   const agent = new Agent({
@@ -28,12 +29,12 @@ test("steering queued before prompt is included in the first Turn", async () => 
     systemPrompt: "test",
     stream: async function* (messages) {
       requests.push(messages.slice());
-      const message = {
+      const message = identifiedMessage("queue-assistant", {
         role: "assistant" as const,
         content: [{ type: "text" as const, text: "done" }],
         stopReason: "stop" as const,
         timestamp: 1,
-      };
+      });
       yield { type: "start", message };
       yield { type: "end", message };
     },
