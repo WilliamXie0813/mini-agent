@@ -37,4 +37,14 @@ export type {
   EditFileParameters,
   ReadFileParameters,
 } from "./harness/tools/index.ts";
+export type {
+  JsonValue,
+  PendingEffect,
+  QueueName,
+  SessionMetadata,
+  SessionOperation,
+  SessionRecord,
+  SessionRecoveryWarning,
+  SessionSnapshot,
+} from "./session.ts";
 export * from "./types.ts";
