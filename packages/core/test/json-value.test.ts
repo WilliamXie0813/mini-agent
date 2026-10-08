@@ -26,6 +26,38 @@ test("toJsonValue copies nested JSON-compatible values", () => {
   assert.notEqual(result.options, input.options);
 });
 
+test("toJsonValue preserves special object keys as own data properties", () => {
+  const input = JSON.parse(
+    '{"__proto__":{"polluted":true},"constructor":{"safe":1},"prototype":{"safe":2},"nested":{"__proto__":{"polluted":false}}}',
+  );
+
+  const result = toJsonValue(input);
+
+  assert.deepEqual(result, input);
+  if (
+    result === null ||
+    Array.isArray(result) ||
+    typeof result !== "object"
+  ) {
+    assert.fail("Expected an object result");
+  }
+  assert.equal(Object.hasOwn(result, "__proto__"), true);
+  assert.equal(Object.hasOwn(result, "constructor"), true);
+  assert.equal(Object.hasOwn(result, "prototype"), true);
+  assert.equal(Object.getPrototypeOf(result), Object.prototype);
+  const nested = result.nested;
+  if (
+    nested === null ||
+    Array.isArray(nested) ||
+    typeof nested !== "object"
+  ) {
+    assert.fail("Expected a nested object result");
+  }
+  assert.equal(Object.hasOwn(nested, "__proto__"), true);
+  assert.equal(Object.getPrototypeOf(nested), Object.prototype);
+  assert.equal(JSON.stringify(result), JSON.stringify(input));
+});
+
 test("toJsonValue allows repeated non-circular references", () => {
   const shared = { value: 1 };
 

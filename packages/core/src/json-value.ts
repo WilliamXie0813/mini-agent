@@ -92,11 +92,17 @@ function convertJsonValue(
 
     const result: { [key: string]: JsonValue } = {};
     for (const [key, item] of Object.entries(value)) {
-      result[key] = convertJsonValue(
+      const convertedItem = convertJsonValue(
         item,
         `${path}.${key}`,
         ancestors,
       );
+      Object.defineProperty(result, key, {
+        value: convertedItem,
+        enumerable: true,
+        configurable: true,
+        writable: true,
+      });
     }
     return result;
   } finally {
